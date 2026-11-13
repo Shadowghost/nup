@@ -5,9 +5,7 @@ per-package meta blocks, the TOC and the superblock. Dump discovery and
 the tree model live in .discover; meta block assembly in .meta.
 
 Implements the producer conformance rules of SPEC.md v1.1 and produces
-deterministic output for a given zstd version. A dump with neither another
-program (written only with all_programs) nor a data patch gives the same file
-as v1.0.
+deterministic output for a given zstd version.
 """
 
 from __future__ import annotations
@@ -352,9 +350,9 @@ def _pack_container(
     if os.path.exists(out_path):
         raise SystemExit(f"pack: refusing to overwrite {out_path}")
 
-    # SPEC §3.1.2/§3.1.6: an update package in a container without its program's
-    # base, and an addon_update without its add-on, must be flagged
-    # standalone_update - split update and dlc containers can be exactly that.
+    # SPEC §3.1.2: an update package in a container without its program's base
+    # must be flagged standalone_update - split update containers are exactly that.
+    # Same for an addon_update without its add-on (SPEC §3.1.6).
     bases = {p.program_index for p in packages if p.kind == F.KIND_BASE}
     addons = {p.title_id for p in packages if p.kind == F.KIND_ADDON}
     for p in packages:

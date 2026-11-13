@@ -80,14 +80,11 @@ assert len(TVL) == 10
 
 PKG_FLAG_STANDALONE_UPDATE: Final = 0x01
 
-# Superblock flags (SPEC §2, §3.1.5). Readers reject bits they do not know, so a
-# feature that older readers must not misread gets a bit here.
-SB_FLAG_MULTI_PROGRAM: Final = 0x01  # some package has program_index != 0
+# Superblock flags (SPEC §2); unknown bits are rejected
+SB_FLAG_MULTI_PROGRAM: Final = 0x01  # SPEC §3.1.5
 SB_FLAGS_KNOWN: Final = SB_FLAG_MULTI_PROGRAM
 
 _super_s: Final = struct.Struct("<4sHHQQ32sQQII16s32s")  # 128
-# title, root, exefs, romfs, version, kind, flags, program_index, reserved u8,
-# reserved2 u32, meta_offset, meta_size, parent_id, reserved3[12] (SPEC §3.1)
 _pkg_s: Final = struct.Struct("<QIIIIBBBBIQIQ12x")  # 64
 _dir_s: Final = struct.Struct("<IIIIQ")  # 24
 _file_s: Final = struct.Struct("<IIQQQ32sBBH12x")  # 80
@@ -116,8 +113,8 @@ class Package:
     flags: int = 0
     meta_offset: int = 0
     meta_size: int = 0
-    program_index: int = 0  # 0x1A: program of a multi-program application (kinds 0 and 1)
-    parent_id: int = 0      # 0x2C: the add-on an addon_update patches (kind 3), else 0
+    program_index: int = 0  # SPEC §3.1.5
+    parent_id: int = 0  # SPEC §3.1.6
 
 
 @dataclass
@@ -168,7 +165,7 @@ def pack_pkg(p: Package) -> bytes:
 
 def pkg_fields(p: Package, meta_offset: int | None = None, meta_size: int | None = None
                ) -> tuple[int, ...]:
-    """The record's fields in _pkg_s order (for pack / pack_into), meta block optionally replaced."""
+    """Package fields in _pkg_s order, with the meta block optionally replaced."""
     return (p.title_id, p.root_dir, p.exefs_dir, p.romfs_dir, p.version, p.kind, p.flags,
             p.program_index, 0, 0, p.meta_offset if meta_offset is None else meta_offset,
             p.meta_size if meta_size is None else meta_size, p.parent_id)

@@ -70,7 +70,7 @@ class PackInput:
     build_id: bytes | None = None
     program_index: int = 0  # SPEC §3.1.5
     parent_id: int = 0      # SPEC §3.1.6: the add-on an addon_update patches
-    skip: frozenset[bytes] = frozenset()  # names left out of the package root (a dump tool's extras)
+    skip: frozenset[bytes] = frozenset()  # root entries left out (Yoink's romfs.img)
 
 
 def _find_npdm(src: str) -> str | None:
@@ -128,8 +128,7 @@ def _has_files(d: str) -> bool:
 
 
 def _check_untarred(d: str) -> None:
-    """OunceCake's --tar mode serves each section as <section>.tar beside where
-    its folder would be: this tool reads folders, so it stops with what to do."""
+    """Refuse OunceCake --tar output (<section>.tar in place of the folder)."""
     tars = [s for s in ("exefs", "romfs") if os.path.isfile(os.path.join(d, s + ".tar"))
             and not os.path.isdir(os.path.join(d, s))]
     if tars:
@@ -139,9 +138,7 @@ def _check_untarred(d: str) -> None:
 
 
 def _root_skip(d: str) -> frozenset[bytes]:
-    """Files a dump tool adds beside a package's sections that are not content:
-    <section>.img, the whole RomFS as one image file next to its folder (Yoink
-    exposes one per RomFS for fast transfer; a full FTP copy picks it up)."""
+    """Root files that duplicate a section (Yoink's romfs.img beside romfs/)."""
     out = {f"{s}.img".encode() for s in ("romfs", "exefs")
            if os.path.isfile(os.path.join(d, s + ".img")) and os.path.isdir(os.path.join(d, s))}
     for name in sorted(out):
@@ -151,12 +148,8 @@ def _root_skip(d: str) -> frozenset[bytes]:
 
 
 def _programs(vdir: str) -> list[tuple[int, str]]:
-    """A version folder's programs, (program index, content dir), lowest first.
-
-    The console's layout (one folder per content meta record, each content at
-    its program index, as OunceCake serves a dump): `<vdir>/program/<index>/`,
-    with `program/` below the index when a data content shares it. The
-    flattened layout: exefs/ and romfs/ in the version folder, program 0."""
+    """(program index, content dir) pairs of a version folder: program/<index>/
+    in the console layout (OunceCake), else the folder itself as program 0."""
     pdir = os.path.join(vdir, "program")
     indexes = sorted(int(n) for n in os.listdir(pdir) if _DEC.match(n)) if os.path.isdir(pdir) else []
     if not indexes:
@@ -177,11 +170,8 @@ def _programs(vdir: str) -> list[tuple[int, str]]:
 
 def _collect_version(kind: F.Kind, vdir: str, version: int, title_id: int | None,
                      all_programs: bool, skipped: list[str]) -> list[PackInput]:
-    """One base or update version folder's packages: program 0, and the other
-    programs with all_programs (else they are listed in skipped). title_id
-    overrides program 0's id (--title-id for the base) or stands in for an
-    update that has no NPDM; another program without an NPDM gets the
-    console's id for it, application id + index."""
+    """Packages of one base/update version folder (SPEC §3.1.5). Programs other
+    than 0 only with all_programs, else they are added to skipped."""
     out: list[PackInput] = []
     for idx, src in _programs(vdir):
         if idx and not all_programs:
@@ -197,7 +187,7 @@ def _collect_version(kind: F.Kind, vdir: str, version: int, title_id: int | None
 
 def _collect_updates(upd_dir: str, base_title_id: int, all_programs: bool,
                      skipped: list[str]) -> list[PackInput]:
-    """updates/<decimal version>/ folders (standalone_update is set by the packer)."""
+    """updates/<decimal version>/ content dirs."""
     out: list[PackInput] = []
     for name in sorted((n for n in os.listdir(upd_dir) if _DEC.match(n)), key=int):
         p = os.path.join(upd_dir, name)
@@ -209,9 +199,7 @@ def _collect_updates(upd_dir: str, base_title_id: int, all_programs: bool,
 
 def _collect_switch2(src: str, app_id: int, all_programs: bool,
                      skipped: list[str]) -> list[PackInput]:
-    """Yoink's layout keeps a Switch 2 Edition's program (program index 1) apart
-    from program 0: switch2/updates/<version>/{exefs,romfs} (and switch2/base/
-    when there is one), each a flattened content dir of program 1."""
+    """Yoink's switch2/base/ and switch2/updates/<v>/: a Switch 2 Edition's program 1."""
     out: list[PackInput] = []
     root = os.path.join(src, "switch2")
     folders = [(F.KIND_BASE, 0, os.path.join(root, "base"))]
@@ -240,11 +228,7 @@ CNMT_TYPE_DATA_PATCH: Final = 0x84
 
 
 def _cnmt_records(content: str) -> list[tuple[int, int, int]]:
-    """The content meta records a dump keeps in a content's meta/ folder, as
-    (id, ContentMetaType, DataId of a data patch else 0): switchbrew's CNMT
-    layout (header 0x20: id u64, version u32, type u8, u8, extended header size
-    u16 at 0xE; a DataPatch's extended header starts with its DataId). The
-    Switch 2 writes the same layout."""
+    """(id, type, DataId) of the CNMT records in <content>/meta/ (switchbrew layout)."""
     meta = os.path.join(content, "meta")
     out: list[tuple[int, int, int]] = []
     for name in sorted(os.listdir(meta)) if os.path.isdir(meta) else []:
@@ -263,8 +247,7 @@ def _cnmt_records(content: str) -> list[tuple[int, int, int]]:
 
 
 def _addon_content(pkg_dir: str) -> str | None:
-    """An add-on package folder's content dir (console layout): program/0/, or
-    program/0/data/ when a program and a data content share the index."""
+    """An add-on package's content dir: program/0/ or program/0/data/."""
     for cand in (os.path.join(pkg_dir, "program", "0"), os.path.join(pkg_dir, "program", "0", "data")):
         if _looks_like_content(cand) and _has_files(cand):
             return cand
@@ -273,9 +256,7 @@ def _addon_content(pkg_dir: str) -> str | None:
 
 def _collect_dlcs(dlc_dir: str) -> list[PackInput]:
     """dlc/<16-hex title id>/<index>/ content dirs (SPEC §3.1.2 addon ids), or the
-    console's layout dlc/<title id>/<version>/base/ (the add-on of that version)
-    and .../updates/<patch version>/ (its data patches: addon_update packages,
-    SPEC §3.1.6, the add-on's whole RomFS with the patch applied, as dumps give it)."""
+    console layout dlc/<title id>/<version>/{base,updates/<v>}/ (SPEC §3.1.6)."""
     out: list[PackInput] = []
     for name in sorted(os.listdir(dlc_dir)):
         tdir = os.path.join(dlc_dir, name)
@@ -292,10 +273,7 @@ def _collect_dlcs(dlc_dir: str) -> list[PackInput]:
                     continue
                 dp = [r for r in _cnmt_records(cdir) if r[1] == CNMT_TYPE_DATA_PATCH]
                 if dp or tid & 0x800:
-                    # a data patch filed under its own id beside its add-on, Yoink's
-                    # layout (dlc/<data patch id>/<version>/romfs): its record names the
-                    # add-on, else the console's convention (add-on index < 0x800, its
-                    # data patch at add-on id + 0x800)
+                    # Yoink: data patch beside its add-on (add-on = CNMT DataId, else id - 0x800)
                     out.append(PackInput(F.KIND_ADDON_UPDATE, cdir, title_id=tid,
                                          version=int(idx, 10) if _DEC.match(idx) else 0,
                                          parent_id=dp[0][2] if dp and dp[0][2] else tid - 0x800,
@@ -321,8 +299,7 @@ def _collect_dlcs(dlc_dir: str) -> list[PackInput]:
                 if dp and dp[0][2] != tid:
                     raise SystemExit(f"pack: {content!r}: its content meta record is data patch "
                                      f"{dp[0][0]:016X} of add-on {dp[0][2]:016X}, the folder is {tid:016X}")
-                # the data patch's own id from its record; without one, the
-                # console's convention (add-on id + 0x800, as patches of applications)
+                # id from the CNMT, else add-on id + 0x800
                 out.append(PackInput(F.KIND_ADDON_UPDATE, content, title_id=dp[0][0] if dp else tid + 0x800,
                                      version=int(pv, 10), parent_id=tid))
     return out
@@ -330,10 +307,7 @@ def _collect_dlcs(dlc_dir: str) -> list[PackInput]:
 
 def discover(src: str, base_title_id: int | None, all_programs: bool = False) -> list[PackInput]:
     """Discover packages in a dump directory (SPEC §3.1.3 conventions).
-
-    all_programs: also the programs other than 0 of a multi-program
-    application (SPEC §3.1.5; such a file needs a NUP 1.1 reader). Without it
-    they are left out and named on stderr."""
+    all_programs also takes programs other than 0 (SPEC §3.1.5)."""
     packages: list[PackInput] = []
     skipped: list[str] = []
     upd_dir = os.path.join(src, "updates")
@@ -344,8 +318,8 @@ def discover(src: str, base_title_id: int | None, all_programs: bool = False) ->
                                  all_programs, skipped)
         packages.extend(bases)
         app_id = next((b.title_id for b in bases if b.program_index == 0), base_title_id or 0)
-        # an empty base/ is not a game: no base package, so a real update can
-        # boot as the standalone program instead of hiding behind a dead base
+        # an empty base/ is not a game: drop it so a real update can boot
+        # as the standalone program instead of hiding behind a dead base
         if has_updates:
             packages.extend(_collect_updates(upd_dir, app_id, all_programs, skipped))
         packages.extend(_collect_switch2(src, app_id, all_programs, skipped))
@@ -353,9 +327,9 @@ def discover(src: str, base_title_id: int | None, all_programs: bool = False) ->
         if os.path.isdir(dlc_dir):
             packages.extend(_collect_dlcs(dlc_dir))
     elif has_updates:
-        # Update-only dump: every update package carries standalone_update
-        # (SPEC §3.1.2, flags bit 0 at offset 0x19; the packer sets it). DLC
-        # may still ride along in dlc/.
+        # Update-only dump:
+        # every update package carries standalone_update (SPEC §3.1.2, flags
+        # bit 0 at offset 0x19). DLC may still ride along in dlc/.
         packages.extend(_collect_updates(upd_dir, base_title_id or 0, all_programs, skipped))
         packages.extend(_collect_switch2(src, base_title_id or 0, all_programs, skipped))
         dlc_dir = os.path.join(src, "dlc")
@@ -400,7 +374,6 @@ class Tree:
         return off
 
     def add_tree(self, src: str, skip: frozenset[bytes] = frozenset()) -> DirObj:
-        """A package's tree; skip names entries of its root to leave out (PackInput.skip)."""
         return self._walk(src, b"", skip)
 
     def _walk(self, src: str, name: bytes, skip: frozenset[bytes] = frozenset()) -> DirObj:

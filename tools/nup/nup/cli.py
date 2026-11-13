@@ -69,7 +69,7 @@ def _relation(p: PackageInfo | PackInput) -> str:
     """' program 1' for another program (SPEC §3.1.5), ' of add-on <id>' for an addon_update (§3.1.6)."""
     out = f" program {p.program_index}" if p.program_index else ""
     if p.kind == F.KIND_ADDON_UPDATE:
-        out += f" of add-on {(p.parent_id or p.title_id):016X}"   # no parent_id: filed under its add-on's id (Yoink)
+        out += f" of add-on {(p.parent_id or p.title_id):016X}"  # Yoink: no parent_id
     return out
 
 

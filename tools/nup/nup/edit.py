@@ -118,7 +118,7 @@ def edit(path: str, *, package: str | None = None, name: str | None = None,
                                 romfs_dir=p.romfs_dir, version=p.version, kind=p.kind,
                                 flags=p.flags, program_index=p.program_index,
                                 parent_id=p.parent_id)
-                F._pkg_s.pack_into(toc, pos, *F.pkg_fields(rec, mo, ms))  # every record field kept
+                F._pkg_s.pack_into(toc, pos, *F.pkg_fields(rec, mo, ms))
                 pos += F.PKG_SIZE
 
             toc_sha = hashlib.sha256(toc).digest()

@@ -33,14 +33,12 @@ class PackageInfo:
     romfs_dir: int
     meta_offset: int
     meta_size: int
-    program_index: int = 0  # SPEC §3.1.5 (kinds 0 and 1)
-    parent_id: int = 0      # SPEC §3.1.6 (kind 3: the add-on it patches)
+    program_index: int = 0  # SPEC §3.1.5
+    parent_id: int = 0  # SPEC §3.1.6
 
     @property
     def addon_id(self) -> int:
-        """The add-on an addon_update patches (SPEC §3.1.6): parent_id, or for a
-        record with none (the encoding of producers before 1.1, e.g. Yoink, which
-        file the data patch under its add-on's id) its own title_id."""
+        """Add-on an addon_update patches: parent_id, else title_id (Yoink, SPEC §3.1.6)."""
         return self.parent_id or self.title_id
 
     @property
@@ -199,12 +197,8 @@ class NupReader:
         self._check_packages()
 
     def _check_packages(self) -> None:
-        """Package-set rules a reader needs to resolve content unambiguously (SPEC
-        §3.1.2, §3.1.5, §3.1.6). Producer rules whose breach leaves the content
-        readable (flag bookkeeping) are verify's (problems()), so files of other
-        producers still open: Yoink (1.0) files a data patch as kind 3 under its
-        add-on's id with no parent_id, and stores a Switch 2 Edition's program as
-        a second update with its own title_id."""
+        """Package rules needed to resolve content (SPEC §3.1.2, §3.1.5, §3.1.6).
+        Flag bookkeeping is left to problems() so other producers' files open (§3.1.7)."""
         bases: set[int] = set()
         updates: set[tuple[int, int, int]] = set()
         addon_updates: set[tuple[int, int, int]] = set()
@@ -230,8 +224,8 @@ class NupReader:
                     raise F.NupError(f"package {p.index}: second addon_update v{p.version} "
                                      f"for add-on {p.addon_id:016X}")
                 addon_updates.add(key)
-        # standalone_update (record flags, offset 0x19, bit 0) on updates: a 1.0
-        # rule, kept as 1.0 readers enforce it (per program in 1.1)
+        # SPEC §3.1.2: update packages need their program's base in the same
+        # container, or the standalone_update flag (record flags, offset 0x19, bit 0).
         for p in self.packages:
             if (p.kind == F.KIND_UPDATE and not (p.flags & F.PKG_FLAG_STANDALONE_UPDATE)
                     and p.program_index not in bases):
@@ -240,8 +234,7 @@ class NupReader:
                     f"standalone_update flag not set")
 
     def problems(self) -> list[str]:
-        """Producer-rule breaches that do not stop reading (SPEC §2 rule 6,
-        §3.1.6): reported by verify, not refused on open."""
+        """Producer-rule breaches that don't stop reading; verify reports them (SPEC §3.1.7)."""
         out: list[str] = []
         pkgs = self.packages
         if bool(self.super["flags"] & F.SB_FLAG_MULTI_PROGRAM) != any(p.program_index for p in pkgs):
