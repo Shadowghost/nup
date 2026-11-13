@@ -272,7 +272,7 @@ per game.
   hardware that runs it, else program 0) and MUST keep programs apart:
   an update applies only to the base of its own program index, which its
   `base content hash` already pins. Add-ons belong to the application,
-  not to a program.
+  not to a program. **[DECIDED]**
 
 ## 5. Update model
 
@@ -332,7 +332,7 @@ diff(0x70000), as two files or as one standalone file (§5.3).
 
 A raw patch (BKTR NCA data) without its base cannot be packed at all; its
 bytes only mean something layered on top of the base. A diff update whose
-matching base file is absent is an error at load time.
+matching base file is absent is an error at load time. **[DECIDED]**
 
 ### 5.3 Standalone containers (base + update in one file)
 
@@ -346,6 +346,7 @@ and applies the diff without any cross-file search.
 No flag marks this case; P = 2 with kind 0 + kind 1 already says it.
 Naming: `<name>.standalone.update.<decimal version>.nup` (RECOMMENDED),
 with the update's decimal version. DLC never joins a standalone container.
+**[DECIDED]**
 
 ### 5.4 Add-on updates
 
@@ -370,6 +371,7 @@ diff against its add-on exactly as an update is against its base.
   add-on's updates whose `base content hash` chains from it, in ascending
   `version` order, as updates apply to a base (§5.1). An add-on update
   that lands on no add-on is an error, as an update without its base is.
+  **[DECIDED]**
 
 ## 6. Integrity
 
@@ -389,7 +391,7 @@ data corruption anywhere, and the record digest binds it all to the
 declared package list. Alignment padding between entries is outside
 every layer. `bind` additionally pins each package's file table to the
 container: scope entry names and sizes MUST match the table rows (still
-O(TOC)).
+O(TOC)). **[DECIDED]**
 
 ### 6.2 Content hash (package identity)
 
@@ -425,7 +427,7 @@ carry (§3); a base package's `base content hash` field is all zero.
 | full | + hash every byte of every entry | whole file |
 | lazy | bind, then file-table hash on each read | amortized |
 
-Emulators SHOULD default to bind + lazy.
+Emulators SHOULD default to bind + lazy. **[DECIDED]**
 
 ### 6.4 Hostile containers
 
@@ -455,7 +457,7 @@ Extractors (anything that writes entries to a host filesystem) MUST:
    probing the folder).
 
 Packers MUST NOT follow links in a dump: a link is an error, not content
-and not something to skip silently.
+and not something to skip silently. **[DECIDED]**
 
 ### 6.5 Known-good lists
 
@@ -496,6 +498,7 @@ hash is listed with the same kind, title id, version and program (and the
 same `files` and `bytes` when both sides give them). Only a check after
 hashing the file data (`package` or `full`, §6.3) says the data is
 the listed state; after `bind` it says only that the file *claims* it.
+**[DECIDED]**
 
 ## 7. Content handling
 
@@ -509,6 +512,8 @@ the listed state; after `bind` it says only that the file *claims* it.
   `main` NSO header at pack time; mods and cheats tooling keys on it.
 - Icons, names and publisher live only in meta.nup TLVs, never as entries.
 - Dump-tool artifacts (`.listing` etc.) MUST NOT be packed.
+
+**[DECIDED]**
 
 ## 8. Worked example - Donkey Kong Bananza
 
