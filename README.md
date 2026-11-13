@@ -40,6 +40,20 @@ nup --help                       # overview of every subcommand
 
 Anything else inside `dlc/` (non-hex names, index dirs without `exefs/`/`romfs/`) is skipped.
 
+The layouts of the Switch 2 dump tools are read as they come:
+
+| directory | becomes |
+|---|---|
+| `base/program/<index>/` and `updates/<v>/program/<index>/` with `exefs/` and/or `romfs/` (the console's layout, OunceCake: one folder per content meta record, each content at its program index) | program 0 as above; other programs with `--all-programs` (SPEC §3.1.5) |
+| `switch2/updates/<v>/` (Yoink: a Switch 2 Edition's program) | `update` packages of program 1, with `--all-programs` |
+| `dlc/<add-on id>/<v>/base/program/0/` (OunceCake) | the `addon` package, version `<v>` |
+| `dlc/<add-on id>/<v>/updates/<patch v>/program/0/` (OunceCake) | an `addon_update` package (SPEC §3.1.6): the data patch, id from its `meta/*.cnmt` record |
+| `dlc/<data patch id>/<v>/romfs/` (Yoink: the data patch beside its add-on; an id whose low 12 bits are `0x800` or more, or a `meta/*.cnmt` saying DataPatch) | an `addon_update` package of add-on id − `0x800` (or the record's) |
+
+A `romfs.img` beside a `romfs/` folder (Yoink's one-file copy of it) is left out. OunceCake's
+`--tar` mode serves `<section>.tar` files: unpack each into a folder of its name first
+(`tar -xf romfs.tar -C romfs`); `pack` stops and says so.
+
 ```
 nup pack <dump_dir> <out.nup> [options]
 ```
@@ -55,6 +69,7 @@ nup pack <dump_dir> <out.nup> [options]
 | `--icon PATH` | icon image, default language (JPEG/PNG as distributed on-console). |
 | `--lang-icon LANG=PATH` | localized icon, repeatable. |
 | `--keep-listings` | keep dump-tool `.listing` files (excluded by default). |
+| `--all-programs` | also store the other programs of a multi-program application (a Switch 2 Edition's program 1; SPEC §3.1.5). Such a file sets the `multi_program` flag, which NUP 1.0 readers refuse; without it those programs are named on stderr and left out. |
 | `-q` | quiet; don't print progress. |
 
 Notes:

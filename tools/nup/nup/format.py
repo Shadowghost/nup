@@ -1,7 +1,9 @@
 """NUP (NX Package) format constants and binary layout.
 
-Implements SPEC.md v1 exactly. All integers little-endian. All reserved
-fields must be zero on write and are validated on read.
+Implements SPEC.md v1.1 exactly (v1 plus multi-program packages and
+addon_update packages, §3.1.5-§3.1.6; a file using neither is a v1 file).
+All integers little-endian. All reserved fields must be zero on write and
+are validated on read.
 """
 
 from __future__ import annotations
@@ -78,8 +80,15 @@ assert len(TVL) == 10
 
 PKG_FLAG_STANDALONE_UPDATE: Final = 0x01
 
+# Superblock flags (SPEC §2, §3.1.5). Readers reject bits they do not know, so a
+# feature that older readers must not misread gets a bit here.
+SB_FLAG_MULTI_PROGRAM: Final = 0x01  # some package has program_index != 0
+SB_FLAGS_KNOWN: Final = SB_FLAG_MULTI_PROGRAM
+
 _super_s: Final = struct.Struct("<4sHHQQ32sQQII16s32s")  # 128
-_pkg_s: Final = struct.Struct("<QIIIIBBHIQI20x")  # 64
+# title, root, exefs, romfs, version, kind, flags, program_index, reserved u8,
+# reserved2 u32, meta_offset, meta_size, parent_id, reserved3[12] (SPEC §3.1)
+_pkg_s: Final = struct.Struct("<QIIIIBBBBIQIQ12x")  # 64
 _dir_s: Final = struct.Struct("<IIIIQ")  # 24
 _file_s: Final = struct.Struct("<IIQQQ32sBBH12x")  # 80
 _toc_head_s: Final = struct.Struct("<4sIQQQQQ")  # 48
@@ -107,6 +116,8 @@ class Package:
     flags: int = 0
     meta_offset: int = 0
     meta_size: int = 0
+    program_index: int = 0  # 0x1A: program of a multi-program application (kinds 0 and 1)
+    parent_id: int = 0      # 0x2C: the add-on an addon_update patches (kind 3), else 0
 
 
 @dataclass
@@ -152,8 +163,15 @@ def pack_super(magic: bytes, header_size: int, header_version: int, toc_offset: 
 
 
 def pack_pkg(p: Package) -> bytes:
-    return _pkg_s.pack(p.title_id, p.root_dir, p.exefs_dir, p.romfs_dir, p.version,
-                       p.kind, p.flags, 0, 0, p.meta_offset, p.meta_size)
+    return _pkg_s.pack(*pkg_fields(p))
+
+
+def pkg_fields(p: Package, meta_offset: int | None = None, meta_size: int | None = None
+               ) -> tuple[int, ...]:
+    """The record's fields in _pkg_s order (for pack / pack_into), meta block optionally replaced."""
+    return (p.title_id, p.root_dir, p.exefs_dir, p.romfs_dir, p.version, p.kind, p.flags,
+            p.program_index, 0, 0, p.meta_offset if meta_offset is None else meta_offset,
+            p.meta_size if meta_size is None else meta_size, p.parent_id)
 
 
 def pack_dir(d: DirNode) -> bytes:
@@ -178,8 +196,8 @@ def parse_super(buf: bytes) -> Super:
         raise NupError(f"header_size {header_size:#x} < {HEADER_SIZE:#x}")
     if reserved != b"\0" * 32:
         raise NupError("superblock reserved bytes not zero")
-    if flags != 0:
-        raise NupError(f"unknown superblock flags {flags:#x}")
+    if flags & ~SB_FLAGS_KNOWN:
+        raise NupError(f"unknown superblock flags {flags & ~SB_FLAGS_KNOWN:#x}")
     return Super(header_size=header_size, header_version=header_version,
                  toc_offset=toc_offset, toc_size=toc_size, toc_sha256=toc_sha256,
                  blob_offset=blob_offset, file_size=file_size,
@@ -187,15 +205,16 @@ def parse_super(buf: bytes) -> Super:
 
 
 def parse_pkg(buf: bytes, off: int) -> Package:
-    (title_id, root, exefs, romfs, version, kind, flags, _r, _r2,
-     meta_offset, meta_size) = _pkg_s.unpack_from(buf, off)
+    (title_id, root, exefs, romfs, version, kind, flags, program_index, _r, _r2,
+     meta_offset, meta_size, parent_id) = _pkg_s.unpack_from(buf, off)
     if kind >= len(KIND_NAMES):
         raise NupError(f"unknown package kind {kind}")
     if _r != 0 or _r2 != 0:
         raise NupError("package reserved bytes not zero")
     return Package(title_id=title_id, root_dir=root, exefs_dir=exefs, romfs_dir=romfs,
                    version=version, kind=kind, flags=flags,
-                   meta_offset=meta_offset, meta_size=meta_size)
+                   meta_offset=meta_offset, meta_size=meta_size,
+                   program_index=program_index, parent_id=parent_id)
 
 
 def parse_file(toc: bytes, pos: int) -> tuple[tuple[int, int], int, bytes, int, int, Codec]:

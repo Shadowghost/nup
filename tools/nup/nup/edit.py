@@ -53,7 +53,8 @@ def _resolve_package(r: NupReader, package: str | None) -> PackageInfo:
     for p in r.packages:
         if p.meta_size and any(t in M.parse_block(_old_block(r, p)) for t in APP_TLVS):
             return p
-    return next((p for p in r.packages if p.kind == F.KIND_BASE), r.packages[0])
+    return next((p for p in r.packages if p.kind == F.KIND_BASE and p.program_index == 0),
+                r.packages[0])
 
 
 def _replace_retry(tmp: str, path: str, attempts: int = 6) -> None:
@@ -113,8 +114,11 @@ def edit(path: str, *, package: str | None = None, name: str | None = None,
             pos = F._toc_head_s.size
             for i, p in enumerate(r.packages):
                 mo, ms = new_offsets[i]
-                F._pkg_s.pack_into(toc, pos, p.title_id, p.root_dir, p.exefs_dir,
-                                   p.romfs_dir, p.version, p.kind, p.flags, 0, 0, mo, ms)
+                rec = F.Package(title_id=p.title_id, root_dir=p.root_dir, exefs_dir=p.exefs_dir,
+                                romfs_dir=p.romfs_dir, version=p.version, kind=p.kind,
+                                flags=p.flags, program_index=p.program_index,
+                                parent_id=p.parent_id)
+                F._pkg_s.pack_into(toc, pos, *F.pkg_fields(rec, mo, ms))  # every record field kept
                 pos += F.PKG_SIZE
 
             toc_sha = hashlib.sha256(toc).digest()

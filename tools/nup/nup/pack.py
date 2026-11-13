@@ -4,8 +4,10 @@ Writes the container: file extents (raw/zstd, deduped, 16-byte aligned),
 per-package meta blocks, the TOC and the superblock. Dump discovery and
 the tree model live in .discover; meta block assembly in .meta.
 
-Implements the producer conformance rules of SPEC.md v1 and produces
-deterministic output for a given zstd version.
+Implements the producer conformance rules of SPEC.md v1.1 and produces
+deterministic output for a given zstd version. A dump with neither another
+program (written only with all_programs) nor a data patch gives the same file
+as v1.0.
 """
 
 from __future__ import annotations
@@ -59,7 +61,8 @@ def _locate_content_dirs(packages: list[PackInput],
     pkg_records: list[F.Package] = []
     for pkg, root in zip(packages, roots):
         rec = F.Package(title_id=pkg.title_id, root_dir=root.id, version=pkg.version,
-                        kind=pkg.kind, flags=pkg.flags)
+                        kind=pkg.kind, flags=pkg.flags, program_index=pkg.program_index,
+                        parent_id=pkg.parent_id)
         for child in root.children:
             if isinstance(child, DirObj):
                 if child.name == b"exefs" and file_counts[child.id]:
@@ -207,7 +210,8 @@ def _write_meta_blocks(
     meta_offsets: list[tuple[int, int]] = []
     app_extra = M.app_meta(names, icons, display_version, dump_label,
                            publisher=publisher)
-    app_pkg_idx = next((i for i, p in enumerate(packages) if p.kind == F.KIND_BASE), 0)
+    app_pkg_idx = next((i for i, p in enumerate(packages)
+                        if p.kind == F.KIND_BASE and p.program_index == 0), 0)
     for i, pkg in enumerate(packages):
         block = M.meta_block(pkg, dump_label, app_extra if i == app_pkg_idx else b"")
         mo = blob_cursor  # == out.tell(); extents were appended sequentially
@@ -224,9 +228,7 @@ def _build_toc(tree: Tree, pkg_records: list[F.Package],
     toc = bytearray(toc_size)
     pos = F._toc_head_s.size
     for rec, (mo, ms) in zip(pkg_records, meta_offsets):
-        F._pkg_s.pack_into(toc, pos, rec.title_id, rec.root_dir, rec.exefs_dir,
-                           rec.romfs_dir, rec.version, rec.kind, rec.flags, 0, 0,
-                           mo, ms)
+        F._pkg_s.pack_into(toc, pos, *F.pkg_fields(rec, mo, ms))
         pos += F.PKG_SIZE
     for d in tree.dirs:
         off = tree.intern(d.name)
@@ -260,7 +262,9 @@ def _split_groups(
 ) -> list[tuple[str, list[PackInput]]]:
     """Split mode: one container per package group, so the base boots on its
     own and updates/DLC are separate files the user can swap or drop.
-    Naming: <stem>.nup (base), <stem>.update.<version>.nup, <stem>.dlc.nup."""
+    Naming: <stem>.nup (base: every program's), <stem>.update.<version>.nup
+    (program 0; <stem>.update.<version>.program<index>.nup for another
+    program), <stem>.dlc.nup (add-ons and their addon_update packages)."""
     stem = out_path[:-4] if out_path.endswith(".nup") else out_path
     groups: list[tuple[str, list[PackInput]]] = []
     base = [p for p in packages if p.kind == F.KIND_BASE]
@@ -268,8 +272,9 @@ def _split_groups(
         groups.append((out_path, base))
     for p in packages:
         if p.kind == F.KIND_UPDATE:
-            groups.append((f"{stem}.update.{p.version}.nup", [p]))
-    addons = [p for p in packages if p.kind == F.KIND_ADDON]
+            program = f".program{p.program_index}" if p.program_index else ""
+            groups.append((f"{stem}.update.{p.version}{program}.nup", [p]))
+    addons = [p for p in packages if p.kind in (F.KIND_ADDON, F.KIND_ADDON_UPDATE)]
     if addons:
         groups.append((f"{stem}.dlc.nup", addons))
     return groups
@@ -295,12 +300,13 @@ def pack(
     icons: dict[str | None, str] | None = None,
     split: bool = False,
     progress: Callable[[int, int, FileObj], None] | None = None,
+    all_programs: bool = False,
 ) -> list[PackInput]:
     if not have_zstd():
         print("pack: warning: zstandard not installed; writing raw (uncompressed) extents",
               file=sys.stderr)
 
-    packages = discover(src, base_title_id)
+    packages = discover(src, base_title_id, all_programs)
 
     if split:
         groups = _split_groups(out_path, packages)
@@ -346,16 +352,24 @@ def _pack_container(
     if os.path.exists(out_path):
         raise SystemExit(f"pack: refusing to overwrite {out_path}")
 
-    # SPEC §3.1.2: an update package in a container without its base must be
-    # flagged standalone_update - split update containers are exactly that.
-    if not any(p.kind == F.KIND_BASE for p in packages):
-        for p in packages:
-            if p.kind == F.KIND_UPDATE:
-                p.flags |= F.PKG_FLAG_STANDALONE_UPDATE
+    # SPEC §3.1.2/§3.1.6: an update package in a container without its program's
+    # base, and an addon_update without its add-on, must be flagged
+    # standalone_update - split update and dlc containers can be exactly that.
+    bases = {p.program_index for p in packages if p.kind == F.KIND_BASE}
+    addons = {p.title_id for p in packages if p.kind == F.KIND_ADDON}
+    for p in packages:
+        if p.kind == F.KIND_UPDATE:
+            alone = p.program_index not in bases
+        elif p.kind == F.KIND_ADDON_UPDATE:
+            alone = p.parent_id not in addons
+        else:
+            continue
+        p.flags = (p.flags & ~F.PKG_FLAG_STANDALONE_UPDATE) | (F.PKG_FLAG_STANDALONE_UPDATE if alone else 0)
+    sb_flags = F.SB_FLAG_MULTI_PROGRAM if any(p.program_index for p in packages) else 0
 
     artifacts = set() if keep_listings else ARTIFACT_NAMES
     tree = Tree(artifacts)
-    roots = [tree.add_tree(pkg.src) for pkg in packages]
+    roots = [tree.add_tree(pkg.src, pkg.skip) for pkg in packages]
     tree.assign(roots)
 
     dir_count = len(tree.dirs)
@@ -394,7 +408,7 @@ def _pack_container(
 
         toc_sha = hashlib.sha256(toc).digest()
         superblock = F.pack_super(F.MAGIC, F.HEADER_SIZE, 1, F.HEADER_SIZE, toc_size,
-                                  toc_sha, blob_offset, file_size, len(pkg_records), 0,
+                                  toc_sha, blob_offset, file_size, len(pkg_records), sb_flags,
                                   uuid)
         out.seek(0)
         out.write(superblock)

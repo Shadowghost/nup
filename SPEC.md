@@ -1,6 +1,11 @@
 # NUP - NX Package Format
 
-**Version:** 1.0-draft · **Extension:** `.nup` · **Magic:** `NUP\x01`
+**Version:** 1.1-draft · **Extension:** `.nup` · **Magic:** `NUP\x01`
+
+1.1 adds multi-program applications (§3.1.5) and add-on updates (§3.1.6) to 1.0 in fields 1.0
+reserved. A file that uses neither is a 1.0 file, byte for byte; a 1.0 reader refuses a
+multi-program file (superblock flag, §2) and reads an add-on update as an unknown package it
+does not select (its add-on then reads unpatched).
 
 NUP is a clean-room container format for **unencrypted NX (Nintendo Switch 1/2) game dumps**.
 
@@ -44,7 +49,7 @@ struct NupSuperblock {           // offset  size
     uint64_t blob_offset;        // 0x38   8    start of blob region, 16-byte aligned
     uint64_t file_size;          // 0x40   8    total size of this .nup file
     uint32_t package_count;      // 0x48   4    number of package records
-    uint32_t flags;              // 0x4C   4    0 for v1; unknown bits ⇒ reject
+    uint32_t flags;              // 0x4C   4    bit0 = multi_program (§3.1.5); unknown bits ⇒ reject
     uint8_t  uuid[16];           // 0x50  16    content-derived, see §2.1
     uint8_t  reserved[32];       // 0x60  32    zero
 };                               // total  0x80
@@ -60,6 +65,10 @@ Validation rules:
    guaranteed by `blob_offset`.)
 4. `SHA-256(TOC bytes)` equals `toc_sha256`.
 5. `package_count >= 1`.
+6. `flags` bit 0 (`multi_program`, value `0x01`) is set exactly when some package has a
+   `program_index` other than 0 (§3.1.5); other bits are zero. A reader that does not
+   implement multi-program packages rejects the file through the unknown-bits rule, instead
+   of mixing programs up.
 
 ### 2.1 UUID
 
@@ -103,11 +112,13 @@ struct NupPackage {              // offset  size
     uint32_t version;            // 0x14   4   NCM content version, verbatim (see §3.1.1)
     uint8_t  kind;               // 0x18   1   see §3.1.2
     uint8_t  flags;              // 0x19   1   bit0 = standalone_update (§3.1.2); other bits zero for v1
-    uint16_t reserved;           // 0x1A   2   zero
+    uint8_t  program_index;      // 0x1A   1   program of a multi-program application (§3.1.5); 0 otherwise
+    uint8_t  reserved;           // 0x1B   1   zero
     uint32_t reserved2;          // 0x1C   4   zero
     uint64_t meta_offset;        // 0x20   8   absolute file offset of meta block, or 0
     uint32_t meta_size;          // 0x28   4   meta block size in bytes, or 0
-    uint8_t  reserved3[20];      // 0x2C  20   zero
+    uint64_t parent_id;          // 0x2C   8   addon_update: the add-on's title_id (§3.1.6); 0 otherwise
+    uint8_t  reserved3[12];      // 0x34  12   zero
 };                               // total  0x40
 ```
 
@@ -128,16 +139,22 @@ Readers treat `version` as opaque.
 | 0 | `base`   | base application program (the game itself) |
 | 1 | `update` | patch program for a base (a container may hold several, distinct `version`s) |
 | 2 | `addon`  | add-on content (DLC), own `title_id` |
-| 3 | `addon_update` | reserved |
+| 3 | `addon_update` | data patch for an add-on (§3.1.6) |
 | 4 | `system` | reserved for future system-data packages (mew) |
 | 5–255 | reserved |
 
-Rules: a container contains at most one `base` package however in the case that a dump
-does not contain a base package, they must be marked standalone via flags bit 0.
-(`standalone_update`, used for update-only dumps; consumers need a matching base elsewhere).
-The bit is package record `flags`, offset `0x19`, bit 0 (value `0x01`) - set it on **every**
-`update` package in a base-less container, and leave it clear when the container has a base.
-`addon` packages carry their add-on `title_id` (e.g. Switch 1 `0100...801`, Switch 2 `0400...3001`).
+Rules: a container contains at most one `base` package per program (§3.1.5; one in a
+single-program container), and at most one `update` per program and `version`. When a
+container holds an update but not the `base` of the update's program, the update must be
+marked standalone via flags bit 0 (`standalone_update`, used for update-only dumps; consumers
+need a matching base elsewhere). The bit is package record `flags`, offset `0x19`, bit 0
+(value `0x01`) - set it on **every** `update` package whose program has no base in the
+container, and leave it clear when it has one. The same bit marks an `addon_update` whose
+add-on is not in the container (§3.1.6). `addon` packages carry their add-on `title_id`
+(e.g. Switch 1 `0100...801`, Switch 2 `0400...3001`).
+
+`program_index` is 0 on `addon`, `addon_update` and `system` packages; `parent_id` is 0 on
+every kind but `addon_update`.
 
 #### 3.1.3 Canonical tree shape
 
@@ -156,6 +173,71 @@ anything else matching the reserved-artifact list (§6.3) unless otherwise.
 
 Cross-package dedup (§3.6) makes the shared files cheap.
 Delta packaging is a possible v2 extension via flags.
+
+#### 3.1.5 Multi-program applications
+
+An application can hold several programs, each a program content with its own ExeFS and
+RomFS at its own index in the application's content meta (the console's `IdOffset`): a
+Switch 2 Edition keeps the Switch 2 program at index 1 beside the original program 0, and
+collections keep one program per game. Each is stored as its own `base` and `update`
+packages, told apart by `program_index` (record offset `0x1A`) - the same tree shape
+(§3.1.3), the program's own `title_id` verbatim from its NPDM (the console derives it as
+application id + index; Switch 2 Editions use the `0400...` namespace for program 1).
+
+Rules:
+
+1. `program_index` 0 is the application's main program, the one a single-program reader
+   uses; packages without the feature are program 0.
+2. Superblock `flags` bit 0 (`multi_program`) is set exactly when some package has a
+   `program_index` other than 0 (§2 rule 6). A container with program 0 only stays a 1.0 file.
+3. At most one `base` per `program_index`; at most one `update` per `program_index` and
+   `version`. An update's program need not have a base in the container (a program that
+   arrived with an update, as a Switch 2 Edition's does): it is then `standalone_update`
+   (§3.1.2), judged per program.
+4. App metadata (names, icons, display version; §5.1) stays on program 0's `base` package.
+5. Consumers pick the program to run (a Switch 2 Edition's program 1 on hardware that
+   runs it, else program 0) and layer updates over the base of the same `program_index`
+   only. Add-ons belong to the application, not to a program.
+
+Producers write programs other than 0 only on request, since 1.0 readers refuse such files.
+
+#### 3.1.6 Add-on updates
+
+An add-on's data patch (the console's `DataPatch` content meta, 15.0.0+) is stored as an
+`addon_update` package (kind 3):
+
+- `title_id` = the data patch's own id (from its content meta record when the dump has
+  one; the console's convention is add-on id + `0x800`), `version` = the data patch's
+  version, `parent_id` (record offset `0x2C`) = the `title_id` of the add-on it patches.
+- Its tree is the add-on's **complete** RomFS with the patch applied (dump tools export
+  the patched storage the game mounts), in the canonical shape (§3.1.3); usually `romfs/`
+  only. Cross-package dedup (§3.6) stores the files it shares with the add-on once.
+- At most one `addon_update` per `parent_id` and `version`. When its add-on is not in the
+  container it is marked `standalone_update` (§3.1.2); otherwise that bit is clear.
+
+Consumers that implement this kind mount the highest-`version` `addon_update` of an add-on
+in place of the add-on's own tree - it replaces it, it is not an overlay, so files the
+patch removed are gone. Readers that do not implement it skip the package and read the
+add-on as it was before the patch.
+
+Producers that wrote kind 3 before 1.1 defined it (Yoink) file the data patch under the
+**add-on's** `title_id` and leave `parent_id` 0, the way updates carry their program's id.
+Readers take `parent_id`, or `title_id` when `parent_id` is 0, as the add-on; uniqueness is
+judged on (add-on, `title_id`, `version`). Verifiers report the missing `parent_id`.
+
+#### 3.1.7 Reading files of other producers (informational)
+
+1.1 readers refuse only what leaves content ambiguous (§3.1.2 duplicates, a missing
+`standalone_update` on an update). Flag bookkeeping that 1.0-era producers could not know
+(`multi_program` without a non-zero `program_index`, the `standalone_update` bit of an
+`addon_update`) is reported by verification, not refused on open. Known shapes:
+
+- Yoink `--edition all` stores a Switch 2 Edition's program as a second `update` of program 0
+  with its own `0400...` `title_id` and the same `version` as program 0's update: updates are
+  told apart by (`program_index`, `title_id`, `version`), so both are read; consumers that
+  know the shape choose by `title_id`. Producers of 1.1 files use `program_index` instead.
+- Yoink `--edition switch2` flattens program 0, the Upgrade Pack and program 1 into one
+  `base` whose `title_id` is the Switch 2 program's - a single-program 1.0 file.
 
 ### 3.2 Directory record - `NupDir` (0x18 bytes)
 
@@ -311,6 +393,8 @@ TLV wins for metadata.
 2. Bounds-check every offset/size against `file_size`; reject overlaps between regions.
 3. Treat `version`, `title_id`, NPDM/NACP payloads as opaque.
 4. Reject unknown `codec`, unknown `kind >= 5`, unknown superblock `flags` bits.
+   A reader without §3.1.6 skips `addon_update` packages; one without §3.1.5 rejects
+   `multi_program` files (rule 4 does it).
 5. Never execute or trust file names as paths (they are labels; overlay logic is the
    consumer's responsibility).
 
@@ -331,6 +415,8 @@ NUP trees; producers MAY support opt-in retention with `flags` bit 1 in the pack
 
 - New codecs: allocate next free `codec` id, specify framing here, bump nothing else.
 - New package kinds / meta types: document in this section.
+- 1.1: superblock `flags` bit 0 `multi_program` and package `program_index` (§3.1.5);
+  kind 3 `addon_update` and package `parent_id` (§3.1.6).
 - v2 candidates (explicitly *not* in v1): chunked zstd with per-chunk hashes, delta updates,
   sparse-file representation, zstd dictionary per package.
 
@@ -402,15 +488,17 @@ normative for the format.
   `RegisteredCache`/`PatchManager` layering (updates overlay via `patch_manager`,
   DLC via AoC registration).
 - Switch 2 NACP (`ApparentPlatform`/`ApplicationControlDataCondition`) already parses in
-  Eden; S2 "upgrade packs" ride the AddOnContent channel, matching NUP `addon` packages.
+  Eden; S2 "upgrade packs" ride the AddOnContent channel, matching NUP `addon` packages
+  (their data patches are `addon_update` packages, §3.1.6).
 
 ### Cross-cutting
 
 - Update layering: consumer overlays the `update` package tree onto `base` (path shadowing),
   then DLC - mirroring how patch NCAs overlay base NCAs today.
-- Multi-program titles: `title_id & ~0xF` grouping applies as on-console; package records
-  need no special support (multiple `base` packages are disallowed in v1 - revisit if
-  multi-program dumps appear; §3.1.2).
+- Multi-program titles: one `base`/`update` set per `program_index` (§3.1.5); the loader
+  picks the program and layers that program's updates only. Switch 2 Editions are the
+  common case (program 1, with its own `0400...` id, often arriving in an update).
+- Add-on updates: mount an add-on's highest `addon_update` in place of its tree (§3.1.6).
 - No key handling anywhere: NUP content is plaintext; consumers skip ticket/key paths.
 
 ---

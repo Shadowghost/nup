@@ -33,6 +33,15 @@ class PackageInfo:
     romfs_dir: int
     meta_offset: int
     meta_size: int
+    program_index: int = 0  # SPEC §3.1.5 (kinds 0 and 1)
+    parent_id: int = 0      # SPEC §3.1.6 (kind 3: the add-on it patches)
+
+    @property
+    def addon_id(self) -> int:
+        """The add-on an addon_update patches (SPEC §3.1.6): parent_id, or for a
+        record with none (the encoding of producers before 1.1, e.g. Yoink, which
+        file the data patch under its add-on's id) its own title_id."""
+        return self.parent_id or self.title_id
 
     @property
     def kind_name(self) -> str:
@@ -133,7 +142,8 @@ class NupReader:
                 index=i, title_id=p.title_id, kind=F.Kind(p.kind), version=p.version,
                 flags=p.flags, root_dir=p.root_dir, exefs_dir=p.exefs_dir,
                 romfs_dir=p.romfs_dir, meta_offset=p.meta_offset,
-                meta_size=p.meta_size))
+                meta_size=p.meta_size, program_index=p.program_index,
+                parent_id=p.parent_id))
 
         self.dirs: list[tuple[bytes, int, int]] = []  # (name, first_child, child_count)
         for _ in range(dir_count):
@@ -186,15 +196,69 @@ class NupReader:
                 raise F.NupError(f"package {p.index}: meta block out of bounds")
             if p.flags & ~F.PKG_FLAG_STANDALONE_UPDATE:
                 raise F.NupError(f"package {p.index}: unknown package flags {p.flags:#x}")
-        # SPEC §3.1.2: update packages need a base in the same container, or
-        # the standalone_update flag (record flags, offset 0x19, bit 0).
-        has_base = any(p.kind == F.KIND_BASE for p in self.packages)
+        self._check_packages()
+
+    def _check_packages(self) -> None:
+        """Package-set rules a reader needs to resolve content unambiguously (SPEC
+        §3.1.2, §3.1.5, §3.1.6). Producer rules whose breach leaves the content
+        readable (flag bookkeeping) are verify's (problems()), so files of other
+        producers still open: Yoink (1.0) files a data patch as kind 3 under its
+        add-on's id with no parent_id, and stores a Switch 2 Edition's program as
+        a second update with its own title_id."""
+        bases: set[int] = set()
+        updates: set[tuple[int, int, int]] = set()
+        addon_updates: set[tuple[int, int, int]] = set()
         for p in self.packages:
-            if (p.kind == F.KIND_UPDATE and not has_base
-                    and not (p.flags & F.PKG_FLAG_STANDALONE_UPDATE)):
+            if p.program_index and p.kind not in (F.KIND_BASE, F.KIND_UPDATE):
+                raise F.NupError(f"package {p.index}: program_index on a {p.kind_name} package")
+            if p.parent_id and p.kind != F.KIND_ADDON_UPDATE:
+                raise F.NupError(f"package {p.index}: parent_id on a {p.kind_name} package")
+            if p.kind == F.KIND_BASE:
+                if p.program_index in bases:
+                    raise F.NupError(f"package {p.index}: second base package for program "
+                                     f"{p.program_index}")
+                bases.add(p.program_index)
+            elif p.kind == F.KIND_UPDATE:
+                key = (p.program_index, p.title_id, p.version)
+                if key in updates:
+                    raise F.NupError(f"package {p.index}: second update {p.title_id:016X} "
+                                     f"v{p.version} for program {p.program_index}")
+                updates.add(key)
+            elif p.kind == F.KIND_ADDON_UPDATE:
+                key = (p.addon_id, p.title_id, p.version)
+                if key in addon_updates:
+                    raise F.NupError(f"package {p.index}: second addon_update v{p.version} "
+                                     f"for add-on {p.addon_id:016X}")
+                addon_updates.add(key)
+        # standalone_update (record flags, offset 0x19, bit 0) on updates: a 1.0
+        # rule, kept as 1.0 readers enforce it (per program in 1.1)
+        for p in self.packages:
+            if (p.kind == F.KIND_UPDATE and not (p.flags & F.PKG_FLAG_STANDALONE_UPDATE)
+                    and p.program_index not in bases):
                 raise F.NupError(
                     f"package {p.index}: update without base in container and "
                     f"standalone_update flag not set")
+
+    def problems(self) -> list[str]:
+        """Producer-rule breaches that do not stop reading (SPEC §2 rule 6,
+        §3.1.6): reported by verify, not refused on open."""
+        out: list[str] = []
+        pkgs = self.packages
+        if bool(self.super["flags"] & F.SB_FLAG_MULTI_PROGRAM) != any(p.program_index for p in pkgs):
+            out.append("multi_program superblock flag does not match the packages' program "
+                       "indexes (set exactly when one is not 0)")
+        addons = {p.title_id for p in pkgs if p.kind == F.KIND_ADDON}
+        for p in pkgs:
+            if p.kind != F.KIND_ADDON_UPDATE:
+                continue
+            if not p.parent_id:
+                out.append(f"package {p.index}: addon_update without parent_id (read as an "
+                           f"update of add-on {p.title_id:016X}, its title_id)")
+            standalone = bool(p.flags & F.PKG_FLAG_STANDALONE_UPDATE)
+            if standalone == (p.addon_id in addons):
+                out.append(f"package {p.index}: addon_update for add-on {p.addon_id:016X}: "
+                           f"standalone_update should be {'clear' if standalone else 'set'}")
+        return out
 
     # ---- member access ----
 

@@ -24,6 +24,8 @@ def verify(path: str, deep: bool = False) -> tuple[bool, list[str]]:
         fail(f"toc_offset {s['toc_offset']:#x} != {F.HEADER_SIZE:#x} (v1)")
     if s["file_size"] < s["blob_offset"]:
         fail("file_size smaller than blob_offset")
+    for msg in r.problems():  # package-set producer rules (SPEC §2 rule 6, §3.1.6)
+        fail(msg)
 
     # slot overlap check: ranges must be disjoint
     ranges = sorted((first, first + count, i)

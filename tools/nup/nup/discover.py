@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import os
 import re
 import struct
+import sys
 from typing import Final
 
 from . import format as F
@@ -67,6 +68,9 @@ class PackInput:
     flags: int = 0
     npdm: bytes | None = None
     build_id: bytes | None = None
+    program_index: int = 0  # SPEC §3.1.5
+    parent_id: int = 0      # SPEC §3.1.6: the add-on an addon_update patches
+    skip: frozenset[bytes] = frozenset()  # names left out of the package root (a dump tool's extras)
 
 
 def _find_npdm(src: str) -> str | None:
@@ -123,62 +127,237 @@ def _has_files(d: str) -> bool:
     return False
 
 
-def _collect_updates(upd_dir: str, base_title_id: int, flags: int) -> list[PackInput]:
-    """updates/<decimal version>/ content dirs; flags propagates standalone_update."""
-    out: list[PackInput] = []
-    for name in sorted(os.listdir(upd_dir)):
-        p = os.path.join(upd_dir, name)
-        if not _DEC.match(name) or not os.path.isdir(p) or not _has_files(p):
-            continue
-        upd = PackInput(F.KIND_UPDATE, p, version=int(name, 10), flags=flags)
-        _resolve_title_id(upd, None)
-        if upd.title_id == 0:
-            upd.title_id = base_title_id
-        out.append(upd)
+def _check_untarred(d: str) -> None:
+    """OunceCake's --tar mode serves each section as <section>.tar beside where
+    its folder would be: this tool reads folders, so it stops with what to do."""
+    tars = [s for s in ("exefs", "romfs") if os.path.isfile(os.path.join(d, s + ".tar"))
+            and not os.path.isdir(os.path.join(d, s))]
+    if tars:
+        raise SystemExit(f"pack: {d!r} holds {', '.join(t + '.tar' for t in tars)} (OunceCake's --tar "
+                         f"mode): unpack each into a folder of its name beside it first, e.g. "
+                         f"tar -xf romfs.tar -C romfs")
+
+
+def _root_skip(d: str) -> frozenset[bytes]:
+    """Files a dump tool adds beside a package's sections that are not content:
+    <section>.img, the whole RomFS as one image file next to its folder (Yoink
+    exposes one per RomFS for fast transfer; a full FTP copy picks it up)."""
+    out = {f"{s}.img".encode() for s in ("romfs", "exefs")
+           if os.path.isfile(os.path.join(d, s + ".img")) and os.path.isdir(os.path.join(d, s))}
+    for name in sorted(out):
+        print(f"pack: {os.path.join(d, name.decode())}: an image of the folder beside it, left out",
+              file=sys.stderr)
+    return frozenset(out)
+
+
+def _programs(vdir: str) -> list[tuple[int, str]]:
+    """A version folder's programs, (program index, content dir), lowest first.
+
+    The console's layout (one folder per content meta record, each content at
+    its program index, as OunceCake serves a dump): `<vdir>/program/<index>/`,
+    with `program/` below the index when a data content shares it. The
+    flattened layout: exefs/ and romfs/ in the version folder, program 0."""
+    pdir = os.path.join(vdir, "program")
+    indexes = sorted(int(n) for n in os.listdir(pdir) if _DEC.match(n)) if os.path.isdir(pdir) else []
+    if not indexes:
+        _check_untarred(vdir)
+        return [(0, vdir)] if _has_files(vdir) else []
+    if _looks_like_content(vdir):
+        raise SystemExit(f"pack: {vdir!r} holds both exefs/ or romfs/ and program/<index>/: "
+                         f"one layout per version folder")
+    out: list[tuple[int, str]] = []
+    for i in indexes:
+        for cand in (os.path.join(pdir, str(i)), os.path.join(pdir, str(i), "program")):
+            _check_untarred(cand)
+            if _looks_like_content(cand) and _has_files(cand):
+                out.append((i, cand))
+                break
     return out
 
 
+def _collect_version(kind: F.Kind, vdir: str, version: int, title_id: int | None,
+                     all_programs: bool, skipped: list[str]) -> list[PackInput]:
+    """One base or update version folder's packages: program 0, and the other
+    programs with all_programs (else they are listed in skipped). title_id
+    overrides program 0's id (--title-id for the base) or stands in for an
+    update that has no NPDM; another program without an NPDM gets the
+    console's id for it, application id + index."""
+    out: list[PackInput] = []
+    for idx, src in _programs(vdir):
+        if idx and not all_programs:
+            skipped.append(src)
+            continue
+        p = PackInput(kind, src, version=version, program_index=idx, skip=_root_skip(src))
+        _resolve_title_id(p, title_id if (idx == 0 and kind == F.KIND_BASE) else None)
+        if p.title_id == 0 and title_id:
+            p.title_id = title_id + idx
+        out.append(p)
+    return out
+
+
+def _collect_updates(upd_dir: str, base_title_id: int, all_programs: bool,
+                     skipped: list[str]) -> list[PackInput]:
+    """updates/<decimal version>/ folders (standalone_update is set by the packer)."""
+    out: list[PackInput] = []
+    for name in sorted((n for n in os.listdir(upd_dir) if _DEC.match(n)), key=int):
+        p = os.path.join(upd_dir, name)
+        if os.path.isdir(p):
+            out.extend(_collect_version(F.KIND_UPDATE, p, int(name, 10), base_title_id,
+                                        all_programs, skipped))
+    return out
+
+
+def _collect_switch2(src: str, app_id: int, all_programs: bool,
+                     skipped: list[str]) -> list[PackInput]:
+    """Yoink's layout keeps a Switch 2 Edition's program (program index 1) apart
+    from program 0: switch2/updates/<version>/{exefs,romfs} (and switch2/base/
+    when there is one), each a flattened content dir of program 1."""
+    out: list[PackInput] = []
+    root = os.path.join(src, "switch2")
+    folders = [(F.KIND_BASE, 0, os.path.join(root, "base"))]
+    udir = os.path.join(root, "updates")
+    folders += [(F.KIND_UPDATE, int(n, 10), os.path.join(udir, n))
+                for n in sorted((n for n in os.listdir(udir) if _DEC.match(n)), key=int)] if os.path.isdir(udir) else []
+    for kind, version, d in folders:
+        if not os.path.isdir(d):
+            continue
+        _check_untarred(d)
+        if not (_looks_like_content(d) and _has_files(d)):
+            continue
+        if not all_programs:
+            skipped.append(d)
+            continue
+        p = PackInput(kind, d, version=version, program_index=1, skip=_root_skip(d))
+        _resolve_title_id(p, None)
+        if p.title_id == 0 and app_id:
+            p.title_id = app_id + 1
+        out.append(p)
+    return out
+
+
+CNMT_TYPE_ADDON: Final = 0x82
+CNMT_TYPE_DATA_PATCH: Final = 0x84
+
+
+def _cnmt_records(content: str) -> list[tuple[int, int, int]]:
+    """The content meta records a dump keeps in a content's meta/ folder, as
+    (id, ContentMetaType, DataId of a data patch else 0): switchbrew's CNMT
+    layout (header 0x20: id u64, version u32, type u8, u8, extended header size
+    u16 at 0xE; a DataPatch's extended header starts with its DataId). The
+    Switch 2 writes the same layout."""
+    meta = os.path.join(content, "meta")
+    out: list[tuple[int, int, int]] = []
+    for name in sorted(os.listdir(meta)) if os.path.isdir(meta) else []:
+        if not name.endswith(".cnmt"):
+            continue
+        with open(os.path.join(meta, name), "rb") as fh:
+            b = fh.read(0x28)
+        if len(b) < 0x20:
+            raise SystemExit(f"pack: {os.path.join(meta, name)!r}: not a content meta record")
+        rid, _ver, typ, _, ext = struct.unpack_from("<QIBBH", b, 0)
+        data_id = 0
+        if typ == CNMT_TYPE_DATA_PATCH and ext >= 8 and len(b) >= 0x28:
+            data_id = struct.unpack_from("<Q", b, 0x20)[0]
+        out.append((rid, typ, data_id))
+    return out
+
+
+def _addon_content(pkg_dir: str) -> str | None:
+    """An add-on package folder's content dir (console layout): program/0/, or
+    program/0/data/ when a program and a data content share the index."""
+    for cand in (os.path.join(pkg_dir, "program", "0"), os.path.join(pkg_dir, "program", "0", "data")):
+        if _looks_like_content(cand) and _has_files(cand):
+            return cand
+    return None
+
+
 def _collect_dlcs(dlc_dir: str) -> list[PackInput]:
-    """dlc/<16-hex title id>/<index>/ content dirs (SPEC §3.1.2 addon ids)."""
+    """dlc/<16-hex title id>/<index>/ content dirs (SPEC §3.1.2 addon ids), or the
+    console's layout dlc/<title id>/<version>/base/ (the add-on of that version)
+    and .../updates/<patch version>/ (its data patches: addon_update packages,
+    SPEC §3.1.6, the add-on's whole RomFS with the patch applied, as dumps give it)."""
     out: list[PackInput] = []
     for name in sorted(os.listdir(dlc_dir)):
         tdir = os.path.join(dlc_dir, name)
         if not _HEX.match(name) or not os.path.isdir(tdir):
             continue
+        tid = int(name, 16)
         for idx in sorted(os.listdir(tdir)):
             cdir = os.path.join(tdir, idx)
-            if os.path.isdir(cdir) and _has_files(cdir):
-                out.append(PackInput(F.KIND_ADDON, cdir, title_id=int(name, 16)))
+            if not os.path.isdir(cdir):
+                continue
+            if not (os.path.isdir(os.path.join(cdir, "base")) or os.path.isdir(os.path.join(cdir, "updates"))):
+                _check_untarred(cdir)
+                if not _has_files(cdir):
+                    continue
+                dp = [r for r in _cnmt_records(cdir) if r[1] == CNMT_TYPE_DATA_PATCH]
+                if dp or tid & 0x800:
+                    # a data patch filed under its own id beside its add-on, Yoink's
+                    # layout (dlc/<data patch id>/<version>/romfs): its record names the
+                    # add-on, else the console's convention (add-on index < 0x800, its
+                    # data patch at add-on id + 0x800)
+                    out.append(PackInput(F.KIND_ADDON_UPDATE, cdir, title_id=tid,
+                                         version=int(idx, 10) if _DEC.match(idx) else 0,
+                                         parent_id=dp[0][2] if dp and dp[0][2] else tid - 0x800,
+                                         skip=_root_skip(cdir)))
+                else:
+                    out.append(PackInput(F.KIND_ADDON, cdir, title_id=tid, skip=_root_skip(cdir)))
+                continue
+            if not _DEC.match(idx):
+                raise SystemExit(f"pack: {cdir!r}: an add-on version folder is named by its version number")
+            base = _addon_content(os.path.join(cdir, "base"))
+            if base:
+                bad = [r for r in _cnmt_records(base) if r[1] == CNMT_TYPE_ADDON and r[0] != tid]
+                if bad:
+                    raise SystemExit(f"pack: {base!r}: its content meta record is add-on "
+                                     f"{bad[0][0]:016X}, the folder is {tid:016X}")
+                out.append(PackInput(F.KIND_ADDON, base, title_id=tid, version=int(idx, 10)))
+            udir = os.path.join(cdir, "updates")
+            for pv in sorted((n for n in os.listdir(udir) if _DEC.match(n)), key=int) if os.path.isdir(udir) else []:
+                content = _addon_content(os.path.join(udir, pv))
+                if content is None:
+                    continue
+                dp = [r for r in _cnmt_records(content) if r[1] == CNMT_TYPE_DATA_PATCH]
+                if dp and dp[0][2] != tid:
+                    raise SystemExit(f"pack: {content!r}: its content meta record is data patch "
+                                     f"{dp[0][0]:016X} of add-on {dp[0][2]:016X}, the folder is {tid:016X}")
+                # the data patch's own id from its record; without one, the
+                # console's convention (add-on id + 0x800, as patches of applications)
+                out.append(PackInput(F.KIND_ADDON_UPDATE, content, title_id=dp[0][0] if dp else tid + 0x800,
+                                     version=int(pv, 10), parent_id=tid))
     return out
 
 
-def discover(src: str, base_title_id: int | None) -> list[PackInput]:
-    """Discover packages in a dump directory (SPEC §3.1.3 conventions)."""
+def discover(src: str, base_title_id: int | None, all_programs: bool = False) -> list[PackInput]:
+    """Discover packages in a dump directory (SPEC §3.1.3 conventions).
+
+    all_programs: also the programs other than 0 of a multi-program
+    application (SPEC §3.1.5; such a file needs a NUP 1.1 reader). Without it
+    they are left out and named on stderr."""
     packages: list[PackInput] = []
+    skipped: list[str] = []
     upd_dir = os.path.join(src, "updates")
     has_updates = os.path.isdir(upd_dir)
 
     if os.path.isdir(os.path.join(src, "base")):
-        base = PackInput(F.KIND_BASE, os.path.join(src, "base"))
-        _resolve_title_id(base, base_title_id)
-        if _has_files(base.src):
-            packages.append(base)
-            if has_updates:
-                packages.extend(_collect_updates(upd_dir, base.title_id, flags=0))
-        elif has_updates:
-            # an empty base/ is not a game: drop it so a real update can boot
-            # as the standalone program instead of hiding behind a dead base
-            packages.extend(_collect_updates(upd_dir, base_title_id or 0,
-                                             flags=F.PKG_FLAG_STANDALONE_UPDATE))
+        bases = _collect_version(F.KIND_BASE, os.path.join(src, "base"), 0, base_title_id,
+                                 all_programs, skipped)
+        packages.extend(bases)
+        app_id = next((b.title_id for b in bases if b.program_index == 0), base_title_id or 0)
+        # an empty base/ is not a game: no base package, so a real update can
+        # boot as the standalone program instead of hiding behind a dead base
+        if has_updates:
+            packages.extend(_collect_updates(upd_dir, app_id, all_programs, skipped))
+        packages.extend(_collect_switch2(src, app_id, all_programs, skipped))
         dlc_dir = os.path.join(src, "dlc")
         if os.path.isdir(dlc_dir):
             packages.extend(_collect_dlcs(dlc_dir))
     elif has_updates:
-        # Update-only dump:
-        # every update package carries standalone_update (SPEC §3.1.2, flags
-        # bit 0 at offset 0x19). DLC may still ride along in dlc/.
-        packages.extend(_collect_updates(upd_dir, base_title_id or 0,
-                                         flags=F.PKG_FLAG_STANDALONE_UPDATE))
+        # Update-only dump: every update package carries standalone_update
+        # (SPEC §3.1.2, flags bit 0 at offset 0x19; the packer sets it). DLC
+        # may still ride along in dlc/.
+        packages.extend(_collect_updates(upd_dir, base_title_id or 0, all_programs, skipped))
+        packages.extend(_collect_switch2(src, base_title_id or 0, all_programs, skipped))
         dlc_dir = os.path.join(src, "dlc")
         if os.path.isdir(dlc_dir):
             packages.extend(_collect_dlcs(dlc_dir))
@@ -190,6 +369,9 @@ def discover(src: str, base_title_id: int | None) -> list[PackInput]:
         raise SystemExit(
             f"pack: {src!r} is neither a dump bundle (base/updates/dlc), an update-only "
             f"dump (updates/), nor a content directory (exefs/ or romfs/)")
+    for s in skipped:
+        print(f"pack: {s}: another program of a multi-program application, left out "
+              f"(--all-programs stores it; such a file needs a NUP 1.1 reader)", file=sys.stderr)
     if not packages:
         raise SystemExit(f"pack: no packages found in {src!r}")
     return packages
@@ -217,10 +399,11 @@ class Tree:
             self.pool[name] = off
         return off
 
-    def add_tree(self, src: str) -> DirObj:
-        return self._walk(src, b"")
+    def add_tree(self, src: str, skip: frozenset[bytes] = frozenset()) -> DirObj:
+        """A package's tree; skip names entries of its root to leave out (PackInput.skip)."""
+        return self._walk(src, b"", skip)
 
-    def _walk(self, src: str, name: bytes) -> DirObj:
+    def _walk(self, src: str, name: bytes, skip: frozenset[bytes] = frozenset()) -> DirObj:
         node = DirObj(name)
         try:
             entries = sorted(os.scandir(src),
@@ -229,6 +412,8 @@ class Tree:
             raise SystemExit(f"pack: cannot read {src}: {exc}")
         for entry in entries:
             ename = entry.name.encode("utf-8", "surrogateescape")
+            if ename in skip:
+                continue
             if entry.is_dir(follow_symlinks=False):
                 node.children.append(self._walk(entry.path, ename))
             elif ename not in self.artifacts:

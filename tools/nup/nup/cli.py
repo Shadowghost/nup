@@ -17,8 +17,8 @@ from .read import NupReader
 from .verify import verify
 
 if TYPE_CHECKING:
-    from .discover import FileObj
-    from .read import NodeRef
+    from .discover import FileObj, PackInput
+    from .read import NodeRef, PackageInfo
 
 
 def _parse_kv_flags(default: str | None, lang_flags: list[str], what: str
@@ -55,13 +55,22 @@ def _cmd_pack(args: argparse.Namespace) -> int:
                     names=_parse_kv_flags(args.name, args.lang_name, "name"),
                     icons=_parse_kv_flags(args.icon, args.lang_icon, "icon"),
                     split=args.split,
-                    progress=None if args.quiet else progress)
+                    progress=None if args.quiet else progress,
+                    all_programs=args.all_programs)
     if not args.quiet:
         print()
     for p in packages:
-        print(f"  {F.KIND_NAMES[p.kind]:<6} {p.title_id:016X} v{p.version} <- {p.src}")
+        print(f"  {F.KIND_NAMES[p.kind]:<6} {p.title_id:016X} v{p.version}{_relation(p)} <- {p.src}")
     print(f"pack: wrote {args.output} in {time.time() - t0:.1f}s")
     return 0
+
+
+def _relation(p: PackageInfo | PackInput) -> str:
+    """' program 1' for another program (SPEC §3.1.5), ' of add-on <id>' for an addon_update (§3.1.6)."""
+    out = f" program {p.program_index}" if p.program_index else ""
+    if p.kind == F.KIND_ADDON_UPDATE:
+        out += f" of add-on {(p.parent_id or p.title_id):016X}"   # no parent_id: filed under its add-on's id (Yoink)
+    return out
 
 
 def _print_tree(r: NupReader, dir_index: int, prefix: str, max_depth: int, depth: int = 0,
@@ -85,7 +94,8 @@ def _cmd_info(args: argparse.Namespace) -> int:
         s = r.super
         uuid = s["uuid"].hex()
         print(f"file:      {args.file}")
-        print(f"version:   NUP v1 (header 0x{s['header_size']:x}, v{s['header_version']})")
+        multi = " multi_program" if s["flags"] & F.SB_FLAG_MULTI_PROGRAM else ""
+        print(f"version:   NUP v1 (header 0x{s['header_size']:x}, v{s['header_version']}){multi}")
         print(f"size:      {s['file_size']:,} bytes")
         print(f"uuid:      {uuid[:8]}-{uuid[8:12]}-{uuid[12:16]}")
         print(f"toc:       @{s['toc_offset']:#x} +{s['toc_size']:,} B")
@@ -98,7 +108,7 @@ def _cmd_info(args: argparse.Namespace) -> int:
             label = f" {name!r}" if name else ""
             if pub:
                 label += f" by {pub!r}"
-            if p.kind == F.KIND_UPDATE and (p.flags & F.PKG_FLAG_STANDALONE_UPDATE):
+            if p.kind in (F.KIND_UPDATE, F.KIND_ADDON_UPDATE) and (p.flags & F.PKG_FLAG_STANDALONE_UPDATE):
                 label += " [standalone]"
             # Version reporting: the display version TLV is the truth. The raw
             # NCM value decodes to major.minor.micro only on Switch 1; Switch 2
@@ -115,7 +125,7 @@ def _cmd_info(args: argparse.Namespace) -> int:
                       f"S1-style decode {p.version_str}, display unknown)"
             else:
                 ver = f"{p.version_str} (NCM v{p.version:#x})"
-            print(f"  [{p.index}] {p.kind_name:<6} {p.title_id:016X} {ver}{label}")
+            print(f"  [{p.index}] {p.kind_name:<6} {p.title_id:016X}{_relation(p)} {ver}{label}")
             loc = localized_titles(r, p)
             if loc:
                 langs = ", ".join(f"{l.decode()}={n.decode('utf-8', 'replace')!r}"
@@ -223,6 +233,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--split", action="store_true",
                    help="write one .nup per package group instead of a single container: "
                         "base (boots alone), one per update (swap/downgrade by file), dlc")
+    p.add_argument("--all-programs", action="store_true",
+                   help="also store the other programs of a multi-program application "
+                        "(e.g. a Switch 2 Edition's program/1/); such a file needs a NUP 1.1 reader")
     p.add_argument("-q", "--quiet", action="store_true")
     p.set_defaults(fn=_cmd_pack)
 
@@ -241,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("extract", help="extract a package (or subtree) to a directory")
     p.add_argument("file")
     p.add_argument("dest")
-    p.add_argument("--package", help="kind name (base/update/addon) or index")
+    p.add_argument("--package", help="kind name (base/update/addon/addon_update) or index")
     p.add_argument("--subtree", help="relative path from package root, e.g. romfs")
     p.add_argument("--flat", action="store_true",
                    help="rescue mode: dump the file table directly, ignoring the "
