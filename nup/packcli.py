@@ -59,7 +59,7 @@ def pack_standalone_flow(args, discovery, tlvs, title_id) -> int:
             "standalone packing needs a bundle with base/ and updates/<version>/, "
             "plus --version when the dump lacks an updates/ dir"
         )
-    update_dir = discovery.updates[update_version]
+    update_dir = update_dir_of(discovery, update_version)
     out = args.out or default_name(update_dir, "standalone", update_version)
     base_record, update_record = pack_standalone_container(
         out,
@@ -306,7 +306,15 @@ def require_update_dir(discovery, args) -> tuple[str, int]:
     if len(discovery.updates) > 1 and args.version is None:
         raise NupError("--version is required: the bundle carries several updates")
     version = args.version or max(discovery.updates)
-    return discovery.updates[version], version
+    return update_dir_of(discovery, version), version
+
+
+def update_dir_of(discovery, version: int) -> str:
+    """The updates/<version>/ folder --version names, else a one-line error."""
+    if version not in discovery.updates:
+        found = ", ".join(str(v) for v in sorted(discovery.updates)) or "none"
+        raise NupError(f"--version {version}: the dump has no updates/{version}/ (updates: {found})")
+    return discovery.updates[version]
 
 
 OUT_SUFFIX = re.compile(r"(\.dlc(\.update)?|(\.standalone)?\.update\.\d+)?\.nup$")

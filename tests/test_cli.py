@@ -9,6 +9,33 @@ from nup.cli import main as nup_main
 from nup.reader import read_container
 
 
+def test_folder_and_missing_file_are_one_line_errors(tmp_path, capsys):
+    """PR #22: no traceback for a folder or a missing file."""
+    assert nup_main(["info", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "is a folder" in err and "nup pack" in err and "Traceback" not in err
+    assert nup_main(["verify", str(tmp_path / "missing.nup")]) == 1
+    assert capsys.readouterr().err.startswith("nup: error:")
+
+
+def test_a_folder_given_as_any_container_is_one_line(base_nup, tmp_path, capsys):
+    """Not only the main file: --base, --chain and the like name containers too."""
+    capsys.readouterr()
+    assert nup_main(["extract", str(base_nup), "-o", str(tmp_path / "out"), "--base", str(tmp_path)]) == 1
+    assert "is a folder, expected a .nup file" in capsys.readouterr().err
+
+
+def test_a_version_the_dump_lacks_is_a_one_line_error(base_dump, tmp_path, capsys):
+    """--version naming no updates/<v>/ folder: no KeyError traceback."""
+    bundle = tmp_path / "Bundle"
+    bundle.mkdir()
+    base_dump.rename(bundle / "base")
+    assert nup_main(["pack", str(bundle), "--kind", "standalone", "--version", "65536",
+                     f"--title-id={BASE_TITLE_ID:x}"]) == 1
+    err = capsys.readouterr().err
+    assert "has no updates/65536/" in err and "Traceback" not in err
+
+
 def test_info_json_matches_human_fields(base_nup, capsys):
     assert nup_main(["info", str(base_nup), "--json"]) == 0
     info = json.loads(capsys.readouterr().out)

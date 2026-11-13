@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 
 from . import __version__
@@ -13,10 +14,21 @@ from .reader import NupReader, read_container
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    container = getattr(args, "file", None)
+    if container is not None and os.path.isdir(container):
+        hint = "; use `nup pack` to turn a dump folder into a .nup" if args.command == "info" else ""
+        print(f"nup: error: {container!r} is a folder, expected a .nup file{hint}", file=sys.stderr)
+        return 1
     try:
         return args.handler(args)
     except NupError as error:
         print(f"nup: error: {error}", file=sys.stderr)
+        return 1
+    except OSError as error:  # a missing or unreadable file: one line, not a traceback (PR #22)
+        if error.filename and os.path.isdir(error.filename):   # a folder as --base, --chain, ...
+            print(f"nup: error: {error.filename!r} is a folder, expected a .nup file", file=sys.stderr)
+        else:
+            print(f"nup: error: {error}", file=sys.stderr)
         return 1
 
 
