@@ -17,6 +17,8 @@ from .layout import (
 )
 from .model import MetaRecord, PackageRecord, validate_record_flags, validate_scope_contiguity
 
+PACKAGE_RESERVED = bytes(3)
+
 
 def meta_length(packages: list[PackageRecord]) -> int:
     length = META_HEADER_SIZE + DIGEST_SIZE
@@ -69,7 +71,8 @@ def encode_package_record(record: PackageRecord) -> bytes:
         record.content_hash,
         record.base_content_hash,
         record.first_entry_index,
-        0,
+        record.program_index,
+        PACKAGE_RESERVED,
     )
     for tlv_type, value in sorted(record.tlvs.items()):
         out += encode_tlv(tlv_type, value)
@@ -145,17 +148,17 @@ def parse_meta_header(body: memoryview) -> dict:
 def parse_package_record(body: memoryview, pos: int) -> tuple[PackageRecord, int]:
     if pos + PACKAGE_FIXED_SIZE > len(body):
         raise NupError("package record overruns the meta record")
-    kind_value, flags, tlv_size, title_id, application_id, version, row_count, content, base_content, first_index, pkg_reserved = (
+    kind_value, flags, tlv_size, title_id, application_id, version, row_count, content, base_content, first_index, program_index, pkg_reserved = (
         PACKAGE_RECORD.unpack_from(body, pos)
     )
     pos += PACKAGE_FIXED_SIZE
-    if pkg_reserved != 0:
+    if pkg_reserved != PACKAGE_RESERVED:
         raise NupError("package record reserved field is not zero")
     kind = parse_kind(kind_value)
     validate_record_flags(
         PackageRecord(kind=kind, flags=flags, title_id=title_id,
                       application_id=application_id, version=version,
-                      first_entry_index=first_index)
+                      first_entry_index=first_index, program_index=program_index)
     )
     tlv_end = pos + tlv_size
     if tlv_end > len(body):
@@ -175,6 +178,7 @@ def parse_package_record(body: memoryview, pos: int) -> tuple[PackageRecord, int
         base_content_hash=base_content,
         tlvs=tlvs,
         files=files,
+        program_index=program_index,
     )
     return record, pos
 

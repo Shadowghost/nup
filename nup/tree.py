@@ -35,9 +35,12 @@ def validate_container_path(path: str) -> None:
 
 def walk_content_dir(root: str, scope: str) -> list[SourceFile]:
     sources = []
+    images = section_images(root)
     for dirpath, _dirnames, filenames in os.walk(root):
         for filename in sorted(filenames):
             if filename.endswith(ARTIFACT_SUFFIXES):
+                continue
+            if dirpath == root and filename in images:
                 continue
             if filename in (META_NAME, DELETED_NAME):
                 raise NupError(
@@ -50,6 +53,15 @@ def walk_content_dir(root: str, scope: str) -> list[SourceFile]:
             sources.append(SourceFile(container_path, fs_path, os.path.getsize(fs_path)))
     sources.sort(key=lambda source: source.container_path.encode("utf-8"))
     return sources
+
+
+def section_images(root: str) -> set[str]:
+    """Root files that duplicate a section: Yoink's romfs.img beside romfs/."""
+    return {
+        f"{section}.img" for section in ("exefs", "romfs")
+        if os.path.isfile(os.path.join(root, f"{section}.img"))
+        and os.path.isdir(os.path.join(root, section))
+    }
 
 
 def hash_source(source: SourceFile) -> tuple[bytes, bytes]:

@@ -89,7 +89,10 @@ def base_rows_of(record: PackageRecord) -> dict[str, FileRow]:
 
 
 def sorted_identity(rows) -> bytes:
-    return content_hash(sorted(rows, key=lambda row: row.path_bytes))
+    """A package state's identity (SPEC §6.2): the content hash of its rows,
+    any order (content_hash sorts them by path bytes). The one helper pack,
+    edit, extract and hashlist compute it with."""
+    return content_hash(list(rows))
 
 
 def pack_tree_package(
@@ -118,7 +121,7 @@ def pack_tree_package(
     record.files.sort(key=lambda row: row.path_bytes)
     blobs.sort(key=lambda blob: blob.name.encode("utf-8"))
     record.content_hash = sorted_identity(materialized.values())
-    return PackedPackage(record, sorted(blobs, key=lambda blob: blob.name.encode("utf-8")))
+    return PackedPackage(record, sorted(blobs, key=lambda blob: blob.name.encode("utf-8")), materialized)
 
 
 def new_package_record(package_input, first_entry_index: int, diff: bool) -> PackageRecord:
@@ -130,6 +133,7 @@ def new_package_record(package_input, first_entry_index: int, diff: bool) -> Pac
         version=package_input.version,
         first_entry_index=first_entry_index,
         tlvs=merged_tlvs(package_input.content_dir, package_input.tlvs or None),
+        program_index=package_input.program_index,
     )
 
 

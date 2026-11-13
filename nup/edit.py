@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 import os
 
 from .errors import NupError
-from .layout import FileRow, TlvType, scope_prefix
-from .model import PackageRecord, addon_index
+from .layout import FileRow, TlvType
+from .model import PackageRecord, scope_of
 from .pack import Blob, PackedPackage, write_container
 from .reader import NupReader, read_container
 from .tree import SourceFile, hash_source, validate_container_path
@@ -93,6 +93,7 @@ def clone_records(reader: NupReader) -> list[PackageRecord]:
                 base_content_hash=record.base_content_hash,
                 tlvs=dict(record.tlvs),
                 files=list(record.files),
+                program_index=record.program_index,
             )
         )
     return clones
@@ -130,7 +131,7 @@ def apply_file_ops(
 
 
 def path_of(record: PackageRecord, container_path: str) -> str:
-    prefix = scope_prefix(record.kind, record.version, addon_index(record)) + "/"
+    prefix = scope_of(record) + "/"
     if not container_path.startswith(prefix):
         raise NupError(f"{container_path!r} does not belong to scope {prefix!r}")
     return container_path[len(prefix):]
@@ -139,7 +140,7 @@ def path_of(record: PackageRecord, container_path: str) -> str:
 def record_for_path(records: list[PackageRecord], container_path: str, *, must_be_absent: bool):
     validate_container_path(container_path)
     for record in records:
-        prefix = scope_prefix_of(record) + "/"
+        prefix = scope_of(record) + "/"
         if container_path.startswith(prefix):
             relative = container_path[len(prefix):]
             present = any(row.path == relative for row in record.files)
@@ -149,10 +150,6 @@ def record_for_path(records: list[PackageRecord], container_path: str, *, must_b
     raise NupError(
         f"{container_path!r} matches no package scope; edits cannot create new packages"
     )
-
-
-def scope_prefix_of(record: PackageRecord) -> str:
-    return scope_prefix(record.kind, record.version, addon_index(record))
 
 
 def hash_new_file(record: PackageRecord, container_path: str, fs_path: str):
@@ -185,7 +182,7 @@ def select_record(records: list[PackageRecord], selector: str) -> PackageRecord:
 
 
 def blobs_for(record: PackageRecord, blobs_by_path: dict[str, Blob]) -> list[Blob]:
-    prefix = scope_prefix_of(record) + "/"
+    prefix = scope_of(record) + "/"
     blobs = []
     for row in record.files:
         container_path = prefix + row.path

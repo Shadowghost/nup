@@ -33,9 +33,11 @@ Upstream reference: [NSP.md](NSP.md).
    instead; standalone updates don't exist (§5.2). **[DECIDED]**
 6. Little-endian everywhere. **[DECIDED]**
 7. **One package group per file.** A container is a base, a single update
-   version, or the add-ons for one title; DLC never shares a file with
-   them. Same split as v1's `--split` mode. One exception: a standalone
-   container packs the base and one update together (§5.3). **[DECIDED]**
+   version, the add-ons for one title, or the add-on updates for one title
+   (§5.4); DLC never shares a file with them. Same split as v1's `--split`
+   mode. One exception: a standalone container packs the base and one
+   update together (§5.3). Every container belongs to one program of the
+   application (§4.1). **[DECIDED]**
 
 ## 2. Container layout
 
@@ -119,22 +121,26 @@ file-table hashes.
             bits - bit allocation happens when a feature needs one)
 
 then P package records, fixed part 0x68 bytes:
-  0x00  u8    kind     0 = base, 1 = update (patch), 2 = add-on
+  0x00  u8    kind     0 = base, 1 = update (patch), 2 = add-on,
+                        3 = add-on update (§5.4)
   0x01  u8    flags    bit0 = diff (incremental against base content hash;
-                        MUST be set for kind=update, clear otherwise;
+                        MUST be set for kinds 1 and 3, clear otherwise;
                         see §5)
   0x02  u16   tlv size (extra metadata after the fixed 0x68 bytes; the
                         whole TLV block must also fit this u16, i.e.
                         64 KiB)
   0x04  u64   title id          (base / patch / addon id)
-  0x0C  u64   application id    (base title id; 0 for kind=base)
+  0x0C  u64   application id    (base title id; 0 for kind=base of
+                        program 0, program 0's title id for another
+                        program's base, §4.1)
   0x14  u32   version           (NCM-style u32, e.g. 0x70000 = rev 7)
   0x18  u32   file count        (entries under this package scope)
   0x1C  0x20  content hash      (package identity, §6.2)
   0x3C  0x20  base content hash (package state this diff applies to;
                         all zero if none)
   0x5C  u64   first entry index (entries of this scope are contiguous)
-  0x64  u32   reserved (zero)
+  0x64  u8    program index     (§4.1; 0 for kinds 2 and 3)
+  0x65  u8[3] reserved (zero)
   0x68  ..    TLVs, u16 type + u16 length + value bytes, written in
                ascending type order
   ..    ..   file table, `file count` entries of:
@@ -149,7 +155,9 @@ them (the CNMT digest role).
 Grouping follows §1 rule 7. A base or update container holds exactly one
 package record (P = 1). A standalone container holds two: the base
 record, then the update record (§5.3). A `dlc.nup` holds every add-on for
-the title (P >= 1, all sharing `application id`).
+the title (P >= 1, all sharing `application id`), a `dlc.update.nup` every
+add-on update (P >= 1, all kind 3, §5.4). All records of a container
+carry the same program index.
 
 Display version (0x0004) is per-package: every package with a Control NCA
 carries its own, read at pack time (base's `1.0.0`, update's `3.2.0`).
@@ -199,17 +207,26 @@ base/exefs/main.npdm
 base/romfs/Pack/AutoCapture.pack.zs
 update/458752/exefs/main     <- kind 1, version 0x70000
 addon/0/romfs/...            <- kind 2
+addonupdate/2049/131072/romfs/...  <- kind 3 (§5.4), version 131072
 ```
 
-- Title IDs follow the console: base `0100XXXX...000`, patch `+0x800`,
-  addon `+0x1000 + index`; stored verbatim as u64. Switch 2 dumps
-  need one normalization step: their NPDM ACI0 program ids live in
-  the console's `0400...` namespace (e.g. DKB's main.npdm says
-  `040074A01BF12000`) and update dumps repeat the *base* id rather
-  than a patch id. Packers therefore normalize `0400...` to `0100...`,
-  take the application id from the dump, and derive patch ids as
-  application + 0x800 (add-ons as +0x1000 + index); `--title-id`
-  overrides. **[DECIDED]**
+An add-on update's scope index is derived like an add-on's,
+`title id - application id - 0x1000` (its own id: a data patch at add-on
+id + 0x800 gets index 0x800 + the add-on's).
+
+- Title IDs follow the console: base `XXXXXXXXXXXXX000`, patch `+0x800`,
+  addon `+0x1000 + index`; stored verbatim as u64, as the console has
+  them. The top byte is the platform's range: `01...` for the Switch,
+  `04...` for the Switch 2 (a native game, e.g. DKB `040074A01BF12000`,
+  and a Switch 2 Edition's Switch 2 program, §4.1). A program's NPDM
+  ACI0 id is its console id: its signed ACID allows only its platform's
+  range (`0100000000010000..01FFFFFFFFFFFFFF` on the Switch,
+  `0400000000010000..04FFFFFFFFFFFFFF` on the Switch 2). Update dumps
+  repeat the *base* id rather than a patch id, so packers take the
+  application id from the dump and derive patch ids as application +
+  0x800 (add-ons as +0x1000 + index), in the application's range;
+  `--title-id` overrides. Ids are never moved between ranges.
+  **[DECIDED]**
 - File naming follows v1's `--split` convention (RECOMMENDED, not
   normative): `<name>.nup` (base), `<name>.update.<decimal version>.nup`
   (update), `<name>.dlc.nup` (add-ons), and
@@ -226,6 +243,36 @@ addon/0/romfs/...            <- kind 2
 - An update's `application id` MUST match the base file's title id, and
   its `base content hash` MUST match the base package's content hash
   (§5, §6.2). In a standalone container both hold by construction.
+- Programs other than 0 (§4.1) insert `.program<index>` after the name:
+  `<name>.program1.nup`, `<name>.program1.update.<version>.nup`,
+  `<name>.program1.standalone.update.<version>.nup`. Add-on updates go to
+  `<name>.dlc.update.nup` (§5.4).
+
+### 4.1 Multi-program titles
+
+An application can hold several programs, each a program content with its
+own ExeFS and RomFS at its own index in the application's content meta
+(the console's `IdOffset`): a Switch 2 Edition keeps its Switch 2 program
+at index 1 beside the original program 0, collections keep one program
+per game.
+
+- Each program packs into containers of its own (§1 rule 7), with the
+  same scope names (`base/`, `update/<version>/`) and rules as program 0;
+  the record's `program index` (0x64) says which program it is.
+- A program other than 0 has its own title id, the program's NPDM id as
+  is (§4): the application id + index in that program's platform range,
+  so a Switch 2 Edition's program 1 of application `010015100B514000` is
+  `040015100B514001`. Readers relate the two by the id without its top
+  byte. Its base record carries the application id (program
+  0's title id), so loaders bind its files to the application. Its
+  updates bind to its own base by `base content hash` (§5.1).
+- A program that arrived with an update (a Switch 2 Edition added to an
+  existing game) has no base dump; it is packed as a base (§5.2).
+- Loaders pick the program to run (a Switch 2 Edition's program 1 on
+  hardware that runs it, else program 0) and MUST keep programs apart:
+  an update applies only to the base of its own program index, which its
+  `base content hash` already pins. Add-ons belong to the application,
+  not to a program.
 
 ## 5. Update model
 
@@ -300,6 +347,30 @@ No flag marks this case; P = 2 with kind 0 + kind 1 already says it.
 Naming: `<name>.standalone.update.<decimal version>.nup` (RECOMMENDED),
 with the update's decimal version. DLC never joins a standalone container.
 
+### 5.4 Add-on updates
+
+An add-on's data patch (the console's `DataPatch` content meta, 15.0.0+;
+a Switch 2 Upgrade Pack's, for one) is an **add-on update**: kind 3, a
+diff against its add-on exactly as an update is against its base.
+
+- `title id` = the data patch's id (from its content meta record when the
+  dump has one; the console's convention is add-on id + 0x800), `version`
+  = the data patch's version, `application id` = the title's.
+- `base content hash` = the content hash of the add-on state it lands on:
+  the add-on's, or the previous add-on update's for a chain. That is the
+  binding; no add-on id is stored. Diff rows and `@deleted` work as in
+  §5.1, and the content hash is the materialized add-on state (§6.2).
+- Dump tools export a data patch as the add-on's whole RomFS with the
+  patch applied; the packer diffs it against the add-on. A data patch
+  whose add-on was not dumped is packed as that add-on (kind 2) with the
+  data patch's version, as a lone update dump is packed as a base (§5.2).
+- Every add-on update of a title goes into one `<name>.dlc.update.nup`
+  (P >= 1, all kind 3).
+- Loaders MUST apply them: they bind the `dlc.nup`, then apply each
+  add-on's updates whose `base content hash` chains from it, in ascending
+  `version` order, as updates apply to a base (§5.1). An add-on update
+  that lands on no add-on is an error, as an update without its base is.
+
 ## 6. Integrity
 
 ### 6.1 Hash chain
@@ -371,7 +442,7 @@ Emulators SHOULD default to bind + lazy.
 
 ## 8. Worked example - Donkey Kong Bananza
 
-Title `010074A01BF12000`, update `010074A01BF12800` v0x70000.
+Title `040074A01BF12000`, update `040074A01BF12800` v0x70000.
 
 ```
 DonkeyKongBananza.nup               (75,243 entries)
@@ -453,18 +524,24 @@ Packing that update dump alone emits one base container, display version
    stores `hashed size` 0 (§2). The zero-out-the-header-hash
    alternative is rejected: every verifier would need the carve-out,
    and generic HFS0 verification of the entry would break.
-8. **Switch 2 title id normalization - RATIFIED 2026-11-06.** Packers
-   normalize `0400...` -> `0100...` and derive patch/add-on ids from
-   the application id (§4); raw ACI0 ids would not match emulator
-   title libraries.
+8. **Switch 2 title ids - REVISED 2026-11-13.** Ratified on 2026-11-06
+   as normalizing `0400...` -> `0100...`; revised to keep the console's
+   ids (§4). The `0400...` ids are not an NPDM quirk: every Switch 2
+   program's signed ACID allows only `0400000000010000..04FFFFFFFFFFFFFF`
+   (Orbitals, and the Switch 2 programs of Super Mario Bros. Wonder's and
+   Kirby and the Forgotten Land's Switch 2 Editions), and normalized ids
+   named a Switch 2 Edition's program 1 as one the console does not have.
+   Patch and add-on ids are still derived from the application id (§4).
+   A tool that needs Switch 1 ids (an emulator's title library) maps
+   them when it reads.
 9. **Block-level dedup.** v2 identity is per file; an update that
    touches one huge file re-stores it whole (issue #9.3). Chunked
    dedup needs an entry-extension design on top of the codec work;
    deferred.
-10. **Multi-program titles.** A container holds one base scope, so a
-   title with several programs packs each as its own container keyed
-   by application id (issue #9.6). Whether the format should model
-   multi-program titles natively is open.
+10. **Multi-program titles - RESOLVED (§4.1).** One program per
+   container, its index in the record's former reserved byte 0x64, the
+   application id on its base (issue #9.6). Add-on data patches likewise
+   got kind 3 (§5.4).
 
 ---
 

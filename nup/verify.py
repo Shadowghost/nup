@@ -90,9 +90,9 @@ def select_packages(reader: NupReader, selector: str | int | None):
 
 
 def package_label(reader: NupReader, record) -> str:
-    from .layout import scope_prefix
+    from .model import scope_of
 
-    return scope_prefix(record.kind, record.version, record.title_id - record.application_id - 0x1000)
+    return scope_of(record)
 
 
 def hash_entry(reader: NupReader, entry) -> tuple[bytes, int]:

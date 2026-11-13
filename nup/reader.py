@@ -3,12 +3,12 @@
 import hashlib
 
 from .errors import NupError, VerificationError
-from .layout import ALIGN, DIGEST_SIZE, META_NAME, Kind, align_up, scope_prefix
+from .layout import ALIGN, DIGEST_SIZE, META_NAME, Kind, align_up
 from .model import (
     MetaRecord,
     PackageRecord,
-    addon_index,
     bind_file_tables,
+    entry_scope_name,
     parse_container_counts,
     parse_container_prefix,
     validate_grouping,
@@ -162,8 +162,7 @@ class NupReader:
         raise NupError(f"no package scope owns entry index {index}")
 
     def entry_name_of(self, record: PackageRecord, offset: int) -> str:
-        prefix = scope_prefix(record.kind, record.version, addon_index(record))
-        return f"{prefix}/{record.files[offset].path}"
+        return entry_scope_name(record, record.files[offset].path)
 
     def verify_entry_table_hashes(self) -> None:
         for entry in self.entries[1:]:

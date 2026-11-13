@@ -39,7 +39,7 @@ def test_struct_widths_match_the_documented_layout():
 
 
 def test_package_record_fixed_part_is_0x68_bytes_ending_before_tlvs():
-    layout = "<BBHQQII32s32sQI"
+    layout = "<BBHQQII32s32sQB3s"  # 0x64: program index, then 3 reserved bytes (SPEC §4.1)
     assert PACKAGE_RECORD.format == layout
     assert PACKAGE_FIXED_SIZE == 0x68
 

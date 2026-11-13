@@ -38,13 +38,17 @@ class Kind(enum.IntEnum):
     BASE = 0
     UPDATE = 1
     ADDON = 2
+    ADDON_UPDATE = 3
 
 
 KIND_SCOPE_PREFIX = {
     Kind.BASE: "base",
     Kind.UPDATE: "update/{version}",
     Kind.ADDON: "addon/{index}",
+    Kind.ADDON_UPDATE: "addonupdate/{index}/{version}",
 }
+
+DIFF_KINDS = frozenset({Kind.UPDATE, Kind.ADDON_UPDATE})
 
 
 class Flags(enum.IntFlag):
@@ -77,13 +81,19 @@ TLV_MAX_LENGTH = 0xFFFF
 CONTAINER_HEADER = struct.Struct("<4sIII")
 CONTAINER_ENTRY = struct.Struct("<QQIIQ32s")
 META_HEADER = struct.Struct("<4sHHIIQ32sII")
-PACKAGE_RECORD = struct.Struct("<BBHQQII32s32sQI")
+PACKAGE_RECORD = struct.Struct("<BBHQQII32s32sQB3s")
 assert CONTAINER_HEADER.size == HEADER_SIZE
 assert CONTAINER_ENTRY.size == ENTRY_SIZE
 assert META_HEADER.size == META_HEADER_SIZE
 assert PACKAGE_RECORD.size == PACKAGE_FIXED_SIZE
 
 U64 = struct.Struct("<Q")
+
+# Title id arithmetic (SPEC §4, §5.4): an update's id is its program's + 0x800,
+# an add-on's the application's + 0x1000 + index, a data patch's its add-on's + 0x800
+PATCH_OFFSET = 0x800
+ADDON_OFFSET = 0x1000
+PROGRAM_INDEX_MAX = 0xFF  # the package record's u8 (SPEC §4.1)
 
 
 SPEC_ISSUES: dict[str, str] = {
@@ -137,12 +147,28 @@ SPEC_ISSUES: dict[str, str] = {
         "exact; 1,306 was a typo and the totals followed from it.  SPEC.md "
         "§8 now carries the measured numbers."
     ),
+    "multi-program": (
+        "§10.10 left multi-program titles open.  Resolution (SPEC §4.1): "
+        "one program per container, the program index in the package "
+        "record's former reserved byte 0x64, the application id on another "
+        "program's base.  Part of v2, not a feature flag: every reader "
+        "keeps programs apart."
+    ),
+    "addon-update": (
+        "Add-on data patches (content meta 0x84) had no package kind.  "
+        "Resolution (SPEC §5.4): kind 3, a diff against its add-on bound by "
+        "base content hash like an update to its base, in its own "
+        "<name>.dlc.update.nup.  Part of v2: every reader applies them."
+    ),
     "switch2-title-id-namespace": (
-        "Switch 2 NPDMs carry program ids in the 0400… namespace and update "
-        "dumps repeat the base application id in their ACI0 (no patch id "
-        "anywhere).  Ratified 2026-11-06: packers normalize 0400… to 0100… "
-        "and derive patch/addon ids from the application id by the "
-        "console's +0x800/+0x1000+index convention; --title-id overrides."
+        "Switch 2 programs have ids in the 0400… range (their signed ACID "
+        "allows only 0400000000010000..04FFFFFFFFFFFFFF), and update dumps "
+        "repeat the base application id in their ACI0 (no patch id anywhere).  "
+        "Revised 2026-11-13 (first ratified as normalizing 0400… to 0100…): "
+        "ids are kept as the console has them; packers derive patch/addon ids "
+        "from the application id by the console's +0x800/+0x1000+index "
+        "convention, in its range; a Switch 2 Edition's program 1 keeps its "
+        "0400… id beside a 0100… application; --title-id overrides."
     ),
 }
 

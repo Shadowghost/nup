@@ -49,6 +49,15 @@ together (§5.3); `--chain` packs a diff against already-packed updates (§5.1
 chains).  Tests: `python3 -m pytest` (synthetic + real-dump subsets);
 `pytest -m real` packs the full dumps.
 
+Bundles are read in the dump tools' layouts: flattened, the console's as
+OunceCake serves it (`base/program/<index>/`, `updates/<v>/program/<index>/`,
+`dlc/<id>/<v>/base/` and `.../updates/<v>/`), and Yoink's (`switch2/updates/<v>/`,
+`dlc/<data patch id>/<v>/`).  OunceCake's `--tar` output must be unpacked
+first; a `romfs.img` beside `romfs/` is skipped.  A multi-program title's
+other programs pack into `<name>.program<N>...` files (§4.1); `--kind dlc` writes the add-ons' data patches to `<name>.dlc.update.nup`
+(§5.4), materialized with `nup extract <name>.dlc.update.nup --base <name>.dlc.nup
+--apply`.
+
 ## v1
 
 The v1 format SPEC (own container, per-file zstd, TOC hashes) and its 
