@@ -93,6 +93,26 @@ An update's (or add-on update's) content hash is the state it produces, so
 it is proven only by recomputing it on the containers it lands on (`--base`);
 without them, and after `--level bind`, the container only *claims* a state.
 
+## Converting v1 files
+
+```sh
+nup convert "Wonder [010074A01BF12000].nup" -o converted/ --name Wonder
+```
+
+`convert` turns a NUP v1 (1.0, the `meow` branch's SPEC) file into the v2 containers
+`pack` would write for the same dump: a base per program, each update as a
+diff against its base, add-ons in `.dlc.nup` and their data patches in
+`.dlc.update.nup`.  Each v1 package is unpacked into a work folder
+(`--work-dir`, default inside the output folder), hash-checked and packed
+again, so it needs disk space for its largest package (all add-ons count
+as one).  Names, publisher,
+display versions, localized names, icons and the NACP's names carry over;
+an icon over the 1 MiB TLV cap is re-encoded with Pillow, or dropped with a
+warning without it.
+Yoink's v1 shapes (data patches filed under their add-on's id, a Switch 2 Edition's
+program as a second update) are recognized.  zstd-compressed v1 files need
+Python 3.14+ or `pip install .[v1]`.
+
 ## v1
 
 The v1 format SPEC (own container, per-file zstd, TOC hashes) and its 

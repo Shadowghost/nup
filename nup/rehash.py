@@ -84,7 +84,7 @@ def load_base_rows(base_path: str | None) -> dict[str, FileRow] | None:
         return None
     from .pack import load_base_for_diff
 
-    _reader, base_record = load_base_for_diff(base_path)
+    base_record = load_base_for_diff(base_path)
     return base_rows_of(base_record)
 
 

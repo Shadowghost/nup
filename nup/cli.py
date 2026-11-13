@@ -1,4 +1,4 @@
-"""Command line interface: pack, info, verify, extract, edit."""
+"""Command line interface: pack, info, verify, hashlist, extract, edit, convert."""
 
 import argparse
 from contextlib import ExitStack
@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.handler(args)
     except NupError as error:
-        print(f"nup: error: {error}", file=sys.stderr)
+        print(f"nup: error: {error}{v1_hint(args, container)}", file=sys.stderr)
         return 1
     except OSError as error:  # a missing or unreadable file: one line, not a traceback (PR #22)
         if error.filename and os.path.isdir(error.filename):   # a folder as --base, --chain, ...
@@ -31,6 +31,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"nup: error: {error}", file=sys.stderr)
         return 1
+
+
+def v1_hint(args, container: str | None) -> str:
+    """A NUP v1 file handed to a v2 command: say how to convert it."""
+    from .v1 import MAGIC
+
+    if container is None or args.command == "convert":
+        return ""
+    try:
+        with open(container, "rb") as handle:
+            is_v1 = handle.read(len(MAGIC)) == MAGIC
+    except OSError:
+        return ""
+    return f" ({container!r} is a NUP v1 file: `nup convert` turns it into v2 containers)" if is_v1 else ""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,6 +83,17 @@ def build_parser() -> argparse.ArgumentParser:
                           help="container(s) the updates or add-on updates land on, to recompute "
                           "their content hash and state size")
     hashlist.set_defaults(handler=command_hashlist)
+
+    convert = sub.add_parser("convert", help="convert a NUP v1 file into v2 containers (best effort)")
+    convert.add_argument("file", help="NUP v1 file")
+    convert.add_argument("-o", "--out", help="output folder (default: <name>.v2/ beside the input)")
+    convert.add_argument("--name", help="output name stem (default: the input's file name)")
+    convert.add_argument("--work-dir", help="folder for unpacking packages: one program package at a "
+                         "time, every add-on together (they pack into one container), then every "
+                         "data patch (default: inside the output folder)")
+    convert.add_argument("--application-id", help="application id, 16 hex digits "
+                         "(default: derived from the packages' title ids)")
+    convert.set_defaults(handler=command_convert)
 
     extract = sub.add_parser("extract", help="write container entries to a directory")
     add_extract_arguments(extract)
@@ -223,6 +248,23 @@ def command_hashlist(args) -> int:
             handle.write(text)
     else:
         sys.stdout.write(text)
+    return 0
+
+
+def command_convert(args) -> int:
+    from .convert import ConvertReport, convert_v1
+    from .packcli import parse_title_id
+
+    application = parse_title_id(args.application_id, "--application-id")
+    report = ConvertReport()
+    try:
+        convert_v1(args.file, args.out, stem=args.name, work_dir=args.work_dir,
+                   application_id=application, report=report)
+    finally:   # what it noticed before a failure can be why it failed
+        for line in report.warnings:
+            print(f"nup: warning: {line}", file=sys.stderr)
+    for path in report.written:
+        print(f"converted {path}")
     return 0
 
 

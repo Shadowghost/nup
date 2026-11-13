@@ -28,7 +28,7 @@ def command_pack(args) -> int:
     discovery = discover_dumps(args.source)
     tlvs = collect_tlvs(args)
     title_id = parse_title_id(args.title_id)
-    application_id = parse_title_id(getattr(args, "application_id", None))
+    application_id = parse_title_id(getattr(args, "application_id", None), "--application-id")
     if args.base is not None:
         return pack_update_flow(args, discovery, tlvs, title_id)
     if args.kind == "standalone":
@@ -238,10 +238,14 @@ def newest_control(updates: dict[int, str]) -> str | None:
     return None
 
 
-def program_title_id(content_dir: str, application_id: int, index: int) -> int:
-    """A program's own id from its NPDM, else the console's application id + index."""
+def program_title_id(content_dir: str, application_id: int, index: int,
+                     fallback: int | None = None) -> int:
+    """A program's own id from its NPDM, else the fallback the caller knows
+    (nup convert: the v1 package's), else the console's application id + index."""
     program_id, _build_id = resolve_identity(content_dir)
-    return program_id if program_id is not None else application_id + index
+    if program_id is not None:
+        return program_id
+    return fallback if fallback is not None else application_id + index
 
 
 def pack_bundle_updates(args, discovery, application_id, base_out, stem,
@@ -435,8 +439,17 @@ def default_name(source_dir: str, variant: str, version: int, stem: str | None =
     return suffixes[variant]
 
 
-def parse_title_id(text: str | None) -> int | None:
-    return None if text is None else int(text, 16)
+def parse_title_id(text: str | None, flag: str = "--title-id") -> int | None:
+    """A 64-bit id in hex (an optional 0x prefix), else a one-line error."""
+    if text is None:
+        return None
+    try:
+        value = int(text, 16)
+    except ValueError:
+        raise NupError(f"{flag} expects up to 16 hex digits, got {text!r}") from None
+    if not 0 <= value < 1 << 64:
+        raise NupError(f"{flag} {text!r} does not fit in 64 bits (16 hex digits)")
+    return value
 
 
 def collect_tlvs(args) -> dict[int, bytes]:

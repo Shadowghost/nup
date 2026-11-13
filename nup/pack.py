@@ -76,13 +76,14 @@ def pack_base_container(
     return packed.record
 
 
-def load_base_for_diff(base_path: str) -> tuple[NupReader, PackageRecord]:
-    reader = read_container(base_path)
-    bases = [record for record in reader.meta.packages if record.kind is Kind.BASE]
+def load_base_for_diff(base_path: str) -> PackageRecord:
+    """The base record of a container, which is closed again at once: an open
+    file stays locked on Windows, so a failed pack could not remove it."""
+    with read_container(base_path) as reader:
+        bases = [record for record in reader.meta.packages if record.kind is Kind.BASE]
     if not bases:
-        reader.close()
         raise NupError(f"{base_path!r} carries no base package to diff against")
-    return reader, bases[0]
+    return bases[0]
 
 
 def pack_update_container(
@@ -98,7 +99,7 @@ def pack_update_container(
 ) -> PackageRecord:
     """Diff container against a base, optionally landing on already-packed
     updates whose materialized state is the diff target (SPEC §5.1 chains)."""
-    _reader, base_record = load_base_for_diff(base_path)
+    base_record = load_base_for_diff(base_path)
     application = application_id if application_id is not None else application_of(base_record)
     target_rows, target_identity = chain_state(base_record, chain or [])
     package_input = PackageInput(
@@ -172,7 +173,7 @@ def load_or_pack_base(base: str, title_id, version: int, tlvs,
                       control_fallback: str | None = None, program_index: int = 0,
                       application_id: int | None = None) -> tuple[PackageRecord, list[Blob]]:
     if base.endswith(".nup") and os.path.isfile(base):
-        _reader, base_record = load_base_for_diff(base)
+        base_record = load_base_for_diff(base)
         return base_record, reuse_container_blobs_from(base, base_record)
     if title_id is None:
         raise NupError("standalone packing from a dump dir needs --title-id")

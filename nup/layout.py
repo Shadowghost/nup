@@ -286,7 +286,11 @@ def encode_localized(records: dict[str, bytes]) -> bytes:
     return bytes(out)
 
 
-def parse_localized(data: memoryview) -> dict[str, bytes]:
+def parse_localized(data: memoryview, *, lenient: bool = False) -> dict[str, bytes]:
+    """Localized records: u8 tag length, ASCII tag, u32 value length, value.
+    lenient (NUP v1's TLVs, same framing): a non-ASCII tag is read with
+    replacement characters for the caller to drop, an empty tag is skipped,
+    and the first record of a tag wins."""
     records: dict[str, bytes] = {}
     pos = 0
     while pos < len(data):
@@ -297,7 +301,7 @@ def parse_localized(data: memoryview) -> dict[str, bytes]:
         if pos + lang_len > len(data):
             raise NupError("localized record overruns the TLV")
         try:
-            lang = bytes(data[pos : pos + lang_len]).decode("ascii").lower()
+            lang = bytes(data[pos : pos + lang_len]).decode("ascii", "replace" if lenient else "strict").lower()
         except UnicodeDecodeError:
             raise NupError("localized record language tag is not ASCII") from None
         pos += lang_len
@@ -307,7 +311,11 @@ def parse_localized(data: memoryview) -> dict[str, bytes]:
         pos += 4
         if pos + value_len > len(data):
             raise NupError("localized record value overruns the TLV")
-        records[lang] = bytes(data[pos : pos + value_len])
+        value = bytes(data[pos : pos + value_len])
+        if not lenient:
+            records[lang] = value
+        elif lang:
+            records.setdefault(lang, value)
         pos += value_len
     return records
 
