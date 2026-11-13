@@ -160,7 +160,8 @@ add-on update (P >= 1, all kind 3, §5.4). All records of a container
 carry the same program index.
 
 Display version (0x0004) is per-package: every package with a Control NCA
-carries its own, read at pack time (base's `1.0.0`, update's `3.2.0`).
+carries its own, read at pack time (base's `1.0.0`, update's `3.2.0`;
+§3.1).
 Add-ons have no Control NCA, so `dlc.nup` metas carry no display version.
 
 TLV types are carried over from v1 so packers keep one code path:
@@ -196,6 +197,48 @@ The per-package **file table** takes over the CNMT's job: one whole-file
 SHA-256 per entry. Roughly 7 MB of meta.nup for a 75K-file base, same
 order as v1's TOC. This is what catches corruption past the 0x200 bytes
 the entry hashes cover.
+
+### 3.1 Metadata from the Control content
+
+The console keeps a title's names, publisher, display version and icons
+in its Control content: `control.nacp` plus one `icon_<Language>.dat`
+JPEG per language. Dump tools that serve the Control content (OunceCake:
+`control/` beside `exefs/` and `romfs/` of each program index) give the
+packer everything the identity TLVs need. Packers SHOULD fill the TLVs
+from it, per package, and let explicit values override field by field:
+
+| TLV | from control.nacp | on |
+|---|---|---|
+| 0x0004 display version | `DisplayVersion` (0x3060, 0x10 bytes) | base and update records |
+| 0x0005 title name | name of the default language | base records |
+| 0x0006 publisher | publisher of the default language | base records |
+| 0x0009 localized title | every other language whose name differs from the default | base records |
+| 0x0003 icon | `icon_<default language>.dat`, only while the whole TLV block stays within 64 KiB; a larger one MAY be re-encoded as a 256x256 JPEG that fits (console icons are often 150-200 KB) | base records |
+
+The default language is the first title slot with a non-empty name, in
+NACP order (0 AmericanEnglish, 1 BritishEnglish, 2 Japanese, 3 French,
+4 German, 5 LatinAmericanSpanish, 6 Spanish, 7 Italian, 8 Dutch,
+9 CanadianFrench, 10 Portuguese, 11 Russian, 12 Korean,
+13 TraditionalChinese, 14 SimplifiedChinese, 15 BrazilianPortuguese),
+the same fallback the console uses. Localized records use BCP 47 tags
+in that order: `en-US`, `en-GB`, `ja`, `fr`, `de`, `es-419`, `es`, `it`,
+`nl`, `fr-CA`, `pt`, `ru`, `ko`, `zh-Hant`, `zh-Hans`, `pt-BR`. A
+language whose name equals the default is left out; readers fall back to
+the default for it anyway (§3, display selection).
+
+Each package reads its own Control content: an update's NACP carries the
+update's display version (`3.2.0`), the base's carries `1.0.0`. An update
+record takes only the display version (identity TLVs live on the base);
+an update stored as a base (§5.2) takes the full set from its own NACP.
+Add-ons have no Control content. Dumps without one (Yoink's FTP tree)
+get their metadata from the packer's caller. **[DECIDED]**
+
+A base without Control content of its own takes its identity TLVs (title
+name, publisher, localized title, icon; not the display version, which
+is the update's) from the newest update of the same program that has
+one. On the console an installed update's Control replaces the base's,
+so a dump of an installed game carries only the update's: the names and
+icon are the title's all the same. **[DECIDED]**
 
 ## 4. Package model and naming
 
@@ -580,10 +623,13 @@ Packing that update dump alone emits one base container, display version
    Worth a meta TLV carrying an optional parallel hash?
 3. **Icon size cap.** The per-TLV length and the per-record `tlv size`
    field are both u16, so a package's whole TLV block must fit 64 KiB.
-   Console nacp icons (0x200 x N languages) plus names/publisher fit
-   with room to spare; confirm no dump ships bigger, or the `tlv size`
-   field has to widen (a layout change). Packagers SHOULD error loudly
-   on overflow, not truncate.
+   Console icons are 256x256 JPEGs of up to 0x20000 bytes each, one per
+   language, so the block cannot hold a title's icon set and may not
+   hold even its default icon. §3.1 therefore carries the default icon
+   only when it fits and no localized icons. Carrying them all needs a
+   wider `tlv size` (a layout change) or icons as entries (§7 forbids
+   that today). Packagers SHOULD error loudly when explicit TLVs
+   overflow, not truncate.
 4. **Path hazards - RESOLVED (§6.4).** Names stay case-sensitive
    bytes; extractors refuse names a target cannot hold and case-variant
    pairs on a folder that folds case, instead of altering or overwriting.

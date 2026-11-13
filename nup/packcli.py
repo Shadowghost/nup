@@ -63,14 +63,15 @@ def pack_standalone_flow(args, discovery, tlvs, title_id) -> int:
         )
     update_dir = update_dir_of(discovery, update_version)
     out = args.out or default_name(update_dir, "standalone", update_version)
+    base_tlvs, update_tlvs = split_display_version(tlvs)
     base_record, update_record = pack_standalone_container(
         out,
         discovery.base_dir,
         update_dir,
         update_version=update_version,
         base_title_id=resolve_title_id(title_id, discovery.base_dir),
-        base_tlvs=tlvs,
-        update_tlvs=update_tlvs_display(args),
+        base_tlvs=base_tlvs,
+        update_tlvs=update_tlvs,
     )
     print(
         f"packed {out}: base ({len(base_record.files)} files) + update v{update_version} "
@@ -117,9 +118,11 @@ def pack_bundle_flow(args, discovery, tlvs, title_id, kind, application_id=None)
     stem = args.name or (bundle_stem(args) if console_layout else None)
     base_out = args.out or default_name(discovery.base_dir, "base", 0, stem)
     title = resolve_title_id(title_id, discovery.base_dir)
-    pack_base_container(base_out, discovery.base_dir, title_id=title, tlvs=tlvs)
+    base_tlvs, update_tlvs = split_display_version(tlvs) if discovery.updates else (tlvs, {})
+    pack_base_container(base_out, discovery.base_dir, title_id=title, tlvs=base_tlvs,
+                        control_fallback=newest_control(discovery.updates))
     written = [base_out]
-    written.extend(pack_bundle_updates(args, discovery, title, base_out, stem))
+    written.extend(pack_bundle_updates(args, discovery, title, base_out, stem, update_tlvs))
     written.extend(pack_other_programs(args, discovery, title))
     for line in written:
         print(f"packed {line}")
@@ -159,8 +162,7 @@ def pack_other_programs(args, discovery, application_id: int) -> list[str]:
                 pack_base_container(
                     out, dump.updates[version],
                     title_id=program_title_id(dump.updates[version], application_id, index),
-                    version=version, tlvs=update_tlvs_display(args) or {},
-                    program_index=index, application_id=application_id,
+                    version=version, program_index=index, application_id=application_id,
                 )
                 written.append(out)
             continue
@@ -169,14 +171,25 @@ def pack_other_programs(args, discovery, application_id: int) -> list[str]:
             base_out, dump.base_dir,
             title_id=program_title_id(dump.base_dir, application_id, index),
             program_index=index, application_id=application_id,
+            control_fallback=newest_control(dump.updates),
         )
         written.append(base_out)
         for version in sorted(dump.updates):
             update_out = beside_out(args, default_name(dump.updates[version], "update", version, stem, index))
             pack_update_container(update_out, dump.updates[version], base_out, version=version,
-                                  application_id=application_id, tlvs=update_tlvs_display(args))
+                                  application_id=application_id)
             written.append(update_out)
     return written
+
+
+def newest_control(updates: dict[int, str]) -> str | None:
+    """The newest update dir that serves Control content: a base without its
+    own takes its identity from it (SPEC §3.1)."""
+    from .nacp import read_control
+    for version in sorted(updates, reverse=True):
+        if read_control(updates[version]) is not None:
+            return updates[version]
+    return None
 
 
 def program_title_id(content_dir: str, application_id: int, index: int) -> int:
@@ -185,7 +198,9 @@ def program_title_id(content_dir: str, application_id: int, index: int) -> int:
     return program_id if program_id is not None else application_id + index
 
 
-def pack_bundle_updates(args, discovery, application_id, base_out, stem) -> list[str]:
+def pack_bundle_updates(args, discovery, application_id, base_out, stem,
+                        update_tlvs: dict[int, bytes] | None = None) -> list[str]:
+    """update_tlvs go to the newest update only (split_display_version)."""
     written = []
     if args.out:
         stem = out_stem(args.out)
@@ -198,14 +213,34 @@ def pack_bundle_updates(args, discovery, application_id, base_out, stem) -> list
             base_out,
             version=version,
             application_id=application_id,
-            tlvs=update_tlvs_display(args),
+            tlvs=update_tlvs if version == max(discovery.updates) else None,
         )
         written.append(update_out)
     return written
 
 
+def split_display_version(tlvs: dict[int, bytes]) -> tuple[dict[int, bytes], dict[int, bytes]]:
+    """(base, newest update) TLVs of a pack that writes a base and its updates:
+    the display version a user gives names the version they dumped, the newest
+    update's; the base and older updates keep their Control content's (SPEC §3.1)."""
+    base = dict(tlvs)
+    version = base.pop(TlvType.DISPLAY_VERSION, None)
+    return base, {TlvType.DISPLAY_VERSION: version} if version is not None else {}
+
+
 def pack_updates_as_base_flow(args, discovery, tlvs, title_id) -> int:
     stem = bundle_stem(args)
+    if len(discovery.updates) > 1 and args.out:
+        raise NupError(
+            f"-o names one file, but this dump packs {len(discovery.updates)} updates as bases; "
+            "pack each updates/<version>/ folder on its own, or leave out -o"
+        )
+    if len(discovery.updates) > 1 and args.display_version is not None:
+        raise NupError(
+            f"--display-version names one package, but this dump packs {len(discovery.updates)} "
+            "updates as bases; pack each updates/<version>/ folder on its own, or let each "
+            "take its Control content's display version"
+        )
     for version in sorted(discovery.updates):
         update_dir = discovery.updates[version]
         out = args.out or default_name(update_dir, "standalone", version, stem)
@@ -214,7 +249,7 @@ def pack_updates_as_base_flow(args, discovery, tlvs, title_id) -> int:
             update_dir,
             title_id=resolve_title_id(title_id, update_dir),
             version=version,
-            tlvs={**tlvs, **(update_tlvs_display(args) or {})},
+            tlvs=tlvs,
         )
         print(
             f"packed {out}: update dump alone, stored as base v{version} "
@@ -358,12 +393,6 @@ def parse_title_id(text: str | None) -> int | None:
     return None if text is None else int(text, 16)
 
 
-def update_tlvs_display(args) -> dict[int, bytes] | None:
-    if args.display_version is None:
-        return None
-    return {TlvType.DISPLAY_VERSION: args.display_version.encode("utf-8")}
-
-
 def collect_tlvs(args) -> dict[int, bytes]:
     tlvs: dict[int, bytes] = {}
     text_tlvs = {
@@ -400,10 +429,18 @@ def add_pack_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--title-id", help="title id, 16 hex digits")
     parser.add_argument("--application-id", help="application id for dlc packs, 16 hex digits")
     parser.add_argument("--version", type=int, help="package version (NCM-style u32)")
-    parser.add_argument("--name")
-    parser.add_argument("--display-version")
-    parser.add_argument("--publisher")
-    parser.add_argument("--icon", help="icon file for the default-language TLV")
+    # metadata flags override the dump's control/control.nacp (SPEC §3.1); in a
+    # pack that writes several packages they describe the title, on the base,
+    # but --display-version names the update when the pack writes one (a dump
+    # of an installed game is at its update's version); every other package
+    # takes its display version from its own Control content
+    parser.add_argument("--name", help="title name (default: from control.nacp)")
+    parser.add_argument("--display-version", help="display version of the newest package: the update "
+                        "when the pack writes base + update (default: from control.nacp)")
+    parser.add_argument("--publisher", help="publisher (default: from control.nacp)")
+    parser.add_argument("--icon", help="icon image for the default-language TLV; a JPEG that fits "
+                        "is kept as is, anything else becomes a 256x256 JPEG (needs Pillow) "
+                        "(default: control/icon_<Language>.dat)")
     parser.add_argument("--lang-name", action="append", default=[], metavar="LANG=TEXT")
-    parser.add_argument("--lang-icon", action="append", default=[], metavar="LANG=FILE")
+    parser.add_argument("--lang-icon", action="append", default=[], metavar="LANG=IMAGE")
     parser.add_argument("--provenance", help="source dump provenance string (TLV 0x000C)")

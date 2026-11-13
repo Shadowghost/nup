@@ -60,7 +60,15 @@ Bundles are read in the dump tools' layouts: flattened, the console's as
 OunceCake serves it (`base/program/<index>/`, `updates/<v>/program/<index>/`,
 `dlc/<id>/<v>/base/` and `.../updates/<v>/`), and Yoink's (`switch2/updates/<v>/`,
 `dlc/<data patch id>/<v>/`).  OunceCake's `--tar` output must be unpacked
-first; a `romfs.img` beside `romfs/` is skipped.  A multi-program title's
+first; a `romfs.img` beside `romfs/` is skipped.  Where the dump has the
+Control content (OunceCake's `control/`), `pack` reads `control.nacp` for
+each package: name, publisher, localized names and the default icon for the
+base, and every update's own display version (SPEC §3.1).  A dump of an
+installed game has only the update's Control content; the base then takes
+its name, publisher and icon from the newest update's.  `--name`,
+`--publisher` and `--icon` override it and describe the base;
+`--display-version` describes the newest package written, the newest update
+when there is one.  Yoink's FTP tree has no Control content, so pass them there.  A multi-program title's
 other programs pack into `<name>.program<N>...` files (§4.1); `--kind dlc` writes the add-ons' data patches to `<name>.dlc.update.nup`
 (§5.4), materialized with `nup extract <name>.dlc.update.nup --base <name>.dlc.nup
 --apply`.

@@ -30,6 +30,7 @@ class PackageInput:
     application_id: int = 0
     tlvs: dict[int, bytes] = field(default_factory=dict)
     program_index: int = 0
+    control_fallback: str | None = None   # a base's: whose Control content to take when it has none (SPEC §3.1)
 
 
 @dataclass(slots=True)
@@ -59,12 +60,16 @@ def pack_base_container(
     tlvs: dict[int, bytes] | None = None,
     program_index: int = 0,
     application_id: int = 0,
+    control_fallback: str | None = None,
 ) -> PackageRecord:
     """A base container; for a program other than 0, application_id binds it to
-    program 0's title (SPEC §4.1)."""
+    program 0's title (SPEC §4.1). control_fallback: an update of the same
+    program whose Control content gives the identity when the base has none
+    (SPEC §3.1)."""
     package_input = PackageInput(
         Kind.BASE, content_dir, version=version, title_id=title_id, tlvs=tlvs or {},
         application_id=application_id if program_index else 0, program_index=program_index,
+        control_fallback=control_fallback,
     )
     packed = pack_tree_package(package_input, first_entry_index=1)
     write_container(out_path, [packed])
@@ -127,8 +132,10 @@ def pack_standalone_container(
     update_tlvs: dict[int, bytes] | None = None,
     update_title_id: int | None = None,
 ) -> tuple[PackageRecord, PackageRecord]:
-    """Base and its diff in one container so the pair travels together (§5.3)."""
-    base_record, base_blobs = load_or_pack_base(base, base_title_id, base_version, base_tlvs)
+    """Base and its diff in one container so the pair travels together (§5.3).
+    A base packed from a dump without Control content takes its identity from
+    the update's (SPEC §3.1)."""
+    base_record, base_blobs = load_or_pack_base(base, base_title_id, base_version, base_tlvs, control_fallback=update_dir)
     update_input = PackageInput(
         Kind.UPDATE,
         update_dir,
@@ -156,14 +163,16 @@ def application_of(base_record: PackageRecord) -> int:
     return base_record.application_id or base_record.title_id
 
 
-def load_or_pack_base(base: str, title_id, version: int, tlvs) -> tuple[PackageRecord, list[Blob]]:
+def load_or_pack_base(base: str, title_id, version: int, tlvs,
+                      control_fallback: str | None = None) -> tuple[PackageRecord, list[Blob]]:
     if base.endswith(".nup") and os.path.isfile(base):
         _reader, base_record = load_base_for_diff(base)
         return base_record, reuse_container_blobs_from(base, base_record)
     if title_id is None:
         raise NupError("standalone packing from a dump dir needs --title-id")
     packed = pack_tree_package(
-        PackageInput(Kind.BASE, base, version=version, title_id=title_id, tlvs=tlvs or {}),
+        PackageInput(Kind.BASE, base, version=version, title_id=title_id, tlvs=tlvs or {},
+                     control_fallback=control_fallback),
         first_entry_index=1,
     )
     return packed.record, packed.blobs

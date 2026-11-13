@@ -19,9 +19,12 @@ from .layout import (
     Kind,
     TlvType,
     content_hash,
+    encode_localized,
+    parse_localized,
     scope_prefix,
 )
 from .model import PackageRecord
+from .nacp import control_icon, control_tlvs, read_control
 from .reader import NupReader, read_container
 from .tree import (
     encode_deleted_manifest,
@@ -77,10 +80,42 @@ def build_identity_tlvs(content_dir: str) -> dict[int, bytes]:
     return tlvs
 
 
-def merged_tlvs(content_dir: str, overrides: dict[int, bytes] | None) -> dict[int, bytes]:
+def localized_merged(tlvs: dict[int, bytes], overrides: dict[int, bytes]) -> dict[int, bytes]:
+    """overrides, with their localized titles merged language by language into
+    the ones tlvs already hold: a --lang-name replaces its own language's
+    record, not the other languages the Control content names."""
+    merged = dict(overrides)
+    if TlvType.LOCALIZED_TITLE in overrides and TlvType.LOCALIZED_TITLE in tlvs:
+        records = parse_localized(memoryview(tlvs[TlvType.LOCALIZED_TITLE]))
+        records.update(parse_localized(memoryview(overrides[TlvType.LOCALIZED_TITLE])))
+        merged[TlvType.LOCALIZED_TITLE] = encode_localized(records)
+    return merged
+
+
+def merged_tlvs(content_dir: str, overrides: dict[int, bytes] | None,
+                kind: Kind = Kind.BASE, control_fallback: str | None = None) -> dict[int, bytes]:
+    """Build id, then the Control content's metadata (SPEC §3.1), then the
+    caller's explicit values, which win field by field. A base without
+    Control content of its own takes the identity TLVs, not the display
+    version, from control_fallback: the newest update of its program that
+    has one (on the console an installed update's Control replaces the
+    base's, so a dump of an installed game has only the update's)."""
     tlvs = build_identity_tlvs(content_dir)
+    control = read_control(content_dir) if kind in (Kind.BASE, Kind.UPDATE) else None
+    if control is not None:
+        tlvs.update(control_tlvs(control, identity=kind is Kind.BASE))
+    elif kind is Kind.BASE and control_fallback:
+        control = read_control(control_fallback)
+        if control is not None:
+            borrowed = control_tlvs(control, identity=True)
+            borrowed.pop(TlvType.DISPLAY_VERSION, None)   # the update's version, not the base's
+            tlvs.update(borrowed)
     if overrides:
-        tlvs.update(overrides)
+        tlvs.update(localized_merged(tlvs, overrides))
+    if control is not None and kind is Kind.BASE and TlvType.ICON not in tlvs:
+        icon = control_icon(control, tlvs)
+        if icon is not None:
+            tlvs[TlvType.ICON] = icon
     return tlvs
 
 
@@ -132,7 +167,8 @@ def new_package_record(package_input, first_entry_index: int, diff: bool) -> Pac
         application_id=package_input.application_id,
         version=package_input.version,
         first_entry_index=first_entry_index,
-        tlvs=merged_tlvs(package_input.content_dir, package_input.tlvs or None),
+        tlvs=merged_tlvs(package_input.content_dir, package_input.tlvs or None, package_input.kind,
+                         package_input.control_fallback),
         program_index=package_input.program_index,
     )
 
