@@ -95,7 +95,21 @@ def add_extract_arguments(parser: argparse.ArgumentParser) -> None:
 def add_edit_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("file")
     parser.add_argument("-o", "--out", help="output path (default: edit in place)")
-    parser.add_argument("--package", default="base", help="package for TLV edits")
+    parser.add_argument("--package", default=None,
+                        help="package for metadata edits: scope label (addon/2), kind when only "
+                        "one package has it, or index "
+                        "(default: the only package, else the base)")
+    meta = parser.add_argument_group("metadata (SPEC §3)")
+    meta.add_argument("--name", help="title name, default language")
+    meta.add_argument("--display-version", help="display version string, e.g. 1.2.0; without --package "
+                      "it names the newest update the container holds, as in pack")
+    meta.add_argument("--publisher")
+    meta.add_argument("--icon", metavar="IMAGE",
+                      help="icon image; a JPEG that fits is kept as is, anything else becomes "
+                      "a 256x256 JPEG (needs Pillow)")
+    meta.add_argument("--lang-name", action="append", default=[], metavar="LANG=TEXT",
+                      help="localized title, BCP 47 tag (e.g. ja=...)")
+    meta.add_argument("--lang-icon", action="append", default=[], metavar="LANG=IMAGE")
     parser.add_argument("--set-tlv", action="append", default=[], metavar="TYPE=VALUE")
     parser.add_argument("--del-tlv", action="append", default=[], metavar="TYPE")
     parser.add_argument("--add-file", action="append", default=[], metavar="PATH=SRC")

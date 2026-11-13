@@ -39,8 +39,15 @@ nup info  DonkeyKongBananza.nup [--json] [--entries]
 nup verify DonkeyKongBananza.nup --level bind|package|full
 nup extract DonkeyKongBananza.update.458752.nup --base DonkeyKongBananza.nup \
     --apply -o game-tree/
-nup edit  game.nup --set-tlv name=Renamed --add-file base/romfs/x.bin=./x.bin
+nup edit  game.nup --name "Renamed" --display-version 1.2.0 --icon cover.png
+nup edit  game.nup --add-file base/romfs/x.bin=./x.bin
 ```
+
+`edit` changes the container's only package, or its base, unless `--package` names
+another (a scope label such as `addon/2`, `base`, `update`, or an index);
+`--display-version` then names the newest update it holds, as in `pack`.  `--icon` and `--lang-icon` keep a
+JPEG that fits the 64 KiB metadata block as is; a PNG or an oversized image
+becomes a 256x256 JPEG, which needs Pillow (`pip install .[images]`).
 
 `pack` accepts a content directory (`exefs/` + `romfs/`), a dump bundle
 (`base/`, `updates/<version>/`, `dlc/`), or an update-only dump, which is

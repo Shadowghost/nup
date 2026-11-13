@@ -9,7 +9,9 @@ import sys
 from .discover import discover_dumps
 from .errors import NupError
 from .identity import require_title_id, resolve_identity
-from .layout import PATCH_OFFSET, TlvType
+from .edit import split_lang
+from .image import prepare_icon
+from .layout import PATCH_OFFSET, TLV_MAX_LENGTH, TlvType, merge_localized
 from .pack import (
     pack_addon_container,
     pack_addon_update_container,
@@ -373,23 +375,19 @@ def collect_tlvs(args) -> dict[int, bytes]:
     for tlv_type, value in text_tlvs.items():
         if value:
             tlvs[tlv_type] = value.encode("utf-8")
-    if args.icon:
-        tlvs[TlvType.ICON] = Path(args.icon).read_bytes()
     for spec in args.lang_name:
-        lang, _, text = spec.partition("=")
+        lang, text = split_lang(spec, "--lang-name")
         merge_localized(tlvs, TlvType.LOCALIZED_TITLE, lang, text.encode("utf-8"))
+    # images as `nup edit` takes them: a JPEG that fits as it is, else converted (image.prepare_icon)
+    if args.icon:
+        tlvs[TlvType.ICON] = prepare_icon(Path(args.icon).read_bytes(), TLV_MAX_LENGTH, "--icon")
     for spec in args.lang_icon:
-        lang, _, path = spec.partition("=")
-        merge_localized(tlvs, TlvType.LOCALIZED_ICON, lang, Path(path).read_bytes())
+        lang, path = split_lang(spec, "--lang-icon")
+        merge_localized(tlvs, TlvType.LOCALIZED_ICON, lang, b"")   # its framing counts against the cap
+        room = TLV_MAX_LENGTH - len(tlvs[TlvType.LOCALIZED_ICON])
+        merge_localized(tlvs, TlvType.LOCALIZED_ICON, lang,
+                        prepare_icon(Path(path).read_bytes(), room, f"--lang-icon {lang}"))
     return tlvs
-
-
-def merge_localized(tlvs: dict[int, bytes], tlv_type: TlvType, lang: str, value: bytes) -> None:
-    from .layout import encode_localized, parse_localized
-
-    records = parse_localized(tlvs.get(tlv_type.value, b""))
-    records[lang] = value
-    tlvs[tlv_type.value] = encode_localized(records)
 
 
 def add_pack_arguments(parser: argparse.ArgumentParser) -> None:

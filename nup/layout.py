@@ -290,6 +290,14 @@ def parse_localized(data: memoryview) -> dict[str, bytes]:
     return records
 
 
+def merge_localized(tlvs: dict[int, bytes], tlv_type: int, lang: str, value: bytes) -> None:
+    """Set one language's record of a localized TLV; tags compare lowercased,
+    as parse_localized reads them."""
+    records = parse_localized(memoryview(tlvs.get(int(tlv_type), b"")))
+    records[lang.lower()] = value
+    tlvs[int(tlv_type)] = encode_localized(records)
+
+
 def scope_prefix(kind: Kind, version: int = 0, index: int = 0) -> str:
     template = KIND_SCOPE_PREFIX[kind]
     return template.format(version=version, index=index)

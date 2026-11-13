@@ -91,10 +91,9 @@ def test_version_and_help_do_not_crash(capsys):
 def test_tlv_length_cap_error_message(base_dump, tmp_path, capsys):
     from nup.layout import TLV_MAX_LENGTH
 
-    huge_icon = tmp_path / "icon.bin"
-    huge_icon.write_bytes(b"\0" * (TLV_MAX_LENGTH + 1))
+    # an icon is converted to fit (image.prepare_icon); text is not
     assert nup_main(["pack", str(base_dump), "-o", str(tmp_path / "x.nup"),
-                     f"--title-id={BASE_TITLE_ID:x}", f"--icon={huge_icon}"]) == 1
+                     f"--title-id={BASE_TITLE_ID:x}", "--provenance=" + "x" * (TLV_MAX_LENGTH + 1)]) == 1
     captured = capsys.readouterr().err
     assert "u16" in captured and "64 KiB" in captured
 
