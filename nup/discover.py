@@ -22,10 +22,10 @@ import struct
 from .errors import NupError
 from .layout import PATCH_OFFSET, PROGRAM_INDEX_MAX
 from .pack import AddonPatchInput
+from .tree import CONTENT_MARKERS, PROGRAM_DIR, is_content_dir, is_program_dir, walk_own_content
 
 DECIMAL = re.compile(r"^\d+$")
 HEX_ID = re.compile(r"^[0-9a-fA-F]{16}$")
-CONTENT_MARKERS = ("exefs", "romfs")
 CNMT_ADDON = 0x82
 CNMT_DATA_PATCH = 0x84
 
@@ -51,7 +51,9 @@ class Discovery:
 def discover_dumps(source: str) -> Discovery:
     check_untarred(source)
     if is_content_dir(source):
-        return Discovery(mode="content", base_dir=source)
+        # program<N>/ beside exefs/ and romfs/ is another program, not program 0's files
+        programs = {index: ProgramDump(base_dir=path) for index, path in flattened_programs(source)}
+        return Discovery(mode="content", base_dir=source, programs=programs)
     if os.path.isdir(os.path.join(source, "base")) or os.path.isdir(os.path.join(source, "updates")):
         return discover_bundle(source)
     raise NupError(
@@ -98,7 +100,9 @@ def programs_of(version_dir: str) -> list[tuple[int, str]]:
             raise NupError(f"{program_root!r}: {name}/ and {other_name}/ are both program {index}")
     if not indexes:
         check_untarred(version_dir)
-        return [(0, version_dir)] if bundle_has_files(version_dir) else []
+        # program 0 only when the folder holds files of its own, not just program<N>/
+        found = [(0, version_dir)] if has_own_files(version_dir) else []
+        return found + flattened_programs(version_dir)
     if is_content_dir(version_dir):
         raise NupError(f"{version_dir!r} holds both exefs/ or romfs/ and program/<index>/")
     found = []
@@ -118,6 +122,30 @@ def check_program_index(index: int, path: str) -> int:
         raise NupError(f"{path!r}: program index {index} does not fit the package record "
                        f"(at most {PROGRAM_INDEX_MAX}, SPEC §4.1)")
     return index
+
+
+def has_own_files(version_dir: str) -> bool:
+    """bundle_has_files, leaving out the program<N>/ folders beside exefs/ and romfs/."""
+    return any(not filename.endswith(".listing")
+               for _dirpath, _dirnames, filenames in walk_own_content(version_dir)
+               for filename in filenames)
+
+
+def flattened_programs(version_dir: str) -> list[tuple[int, str]]:
+    """(index, dir) of the program<N>/ folders a flattened version folder
+    holds beside its own exefs/ and romfs/ (base/program1/,
+    updates/<v>/program1/): a Switch 2 Edition's program 1 kept with its
+    version. Program 0's walk leaves them out (tree.walk_content_dir)."""
+    if not os.path.isdir(version_dir):
+        return []
+    found = []
+    for name in sorted(os.listdir(version_dir)):
+        if is_program_dir(version_dir, name):
+            path = os.path.join(version_dir, name)
+            check_untarred(path)
+            if bundle_has_files(path):
+                found.append((check_program_index(int(PROGRAM_DIR.match(name).group(1)), path), path))
+    return found
 
 
 def collect_switch2(source: str, discovery: Discovery) -> None:
@@ -156,10 +184,6 @@ def version_dirs(parent: str) -> list[tuple[int, str]]:
         if DECIMAL.match(name) and os.path.isdir(os.path.join(parent, name))
         and bundle_has_files(os.path.join(parent, name))
     )
-
-
-def is_content_dir(path: str) -> bool:
-    return any(os.path.isdir(os.path.join(path, marker)) for marker in CONTENT_MARKERS)
 
 
 def check_untarred(path: str) -> None:

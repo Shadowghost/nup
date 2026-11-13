@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import PurePosixPath
+import re
 import unicodedata
 
 from .errors import NupError
@@ -153,10 +154,33 @@ def check_extract_paths(root: str, paths: list[str]) -> None:
         )
 
 
+CONTENT_MARKERS = ("exefs", "romfs")
+PROGRAM_DIR = re.compile(r"^program0*([1-9]\d*)$")   # leading zeros too, as program/<index>/ takes them
+
+
+def is_content_dir(path: str) -> bool:
+    return any(os.path.isdir(os.path.join(path, marker)) for marker in CONTENT_MARKERS)
+
+
+def is_program_dir(parent: str, name: str) -> bool:
+    """program<N>/ (N >= 1) beside exefs/ and romfs/ of a flattened version
+    folder: another program of the same version, a content dir of its own."""
+    return bool(PROGRAM_DIR.match(name)) and is_content_dir(os.path.join(parent, name))
+
+
+def walk_own_content(root: str):
+    """os.walk of a content dir without the program<N>/ folders beside its
+    exefs/ and romfs/: another program's content (discover.flattened_programs)."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        if dirpath == root:
+            dirnames[:] = [name for name in dirnames if not is_program_dir(root, name)]
+        yield dirpath, dirnames, filenames
+
+
 def walk_content_dir(root: str, scope: str) -> list[SourceFile]:
     sources = []
     images = section_images(root)
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in walk_own_content(root):
         for name in dirnames + filenames:
             if is_link(os.path.join(dirpath, name)):
                 raise NupError(f"{os.path.join(dirpath, name)!r} is a link; dumps hold plain files (SPEC §6.4)")

@@ -58,8 +58,10 @@ chains).  Tests: `python3 -m pytest` (synthetic + real-dump subsets);
 
 Bundles are read in the dump tools' layouts: flattened, the console's as
 OunceCake serves it (`base/program/<index>/`, `updates/<v>/program/<index>/`,
-`dlc/<id>/<v>/base/` and `.../updates/<v>/`), and Yoink's (`switch2/updates/<v>/`,
-`dlc/<data patch id>/<v>/`).  OunceCake's `--tar` output must be unpacked
+`dlc/<id>/<v>/base/` and `.../updates/<v>/`), Yoink's (`switch2/updates/<v>/`,
+`dlc/<data patch id>/<v>/`), and flattened version folders that keep another
+program beside their own `exefs/` and `romfs/` (`updates/<v>/program1/`).
+OunceCake's `--tar` output must be unpacked
 first; a `romfs.img` beside `romfs/` is skipped.  Where the dump has the
 Control content (OunceCake's `control/`), `pack` reads `control.nacp` for
 each package: name, publisher, localized names and the default icon for the

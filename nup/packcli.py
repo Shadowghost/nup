@@ -40,7 +40,7 @@ def command_pack(args) -> int:
 
 def pack_update_flow(args, discovery, tlvs, title_id) -> int:
     update_dir, version = require_update_dir(discovery, args)
-    out = args.out or default_name(update_dir, "update", version)
+    out = args.out or default_name(update_dir, "update", version, program0_stem(args, discovery))
     record = pack_update_container(
         out,
         update_dir,
@@ -51,6 +51,11 @@ def pack_update_flow(args, discovery, tlvs, title_id) -> int:
         chain=args.chain,
     )
     print(f"packed {out}: update v{version}, {len(record.files)} diff files")
+    for index, dump in sorted(discovery.programs.items()):
+        for path in [dump.base_dir, *dump.updates.values()]:
+            if path is not None:   # --base names program 0's base: another program needs its own
+                print(f"nup: warning: {path!r} is program {index}, not packed: pack it with "
+                      f"--base <its program's base>", file=sys.stderr)
     return 0
 
 
@@ -62,7 +67,7 @@ def pack_standalone_flow(args, discovery, tlvs, title_id) -> int:
             "plus --version when the dump lacks an updates/ dir"
         )
     update_dir = update_dir_of(discovery, update_version)
-    out = args.out or default_name(update_dir, "standalone", update_version)
+    out = args.out or default_name(update_dir, "standalone", update_version, program0_stem(args, discovery))
     base_tlvs, update_tlvs = split_display_version(tlvs)
     base_record, update_record = pack_standalone_container(
         out,
@@ -77,6 +82,9 @@ def pack_standalone_flow(args, discovery, tlvs, title_id) -> int:
         f"packed {out}: base ({len(base_record.files)} files) + update v{update_version} "
         f"({len(update_record.files)} diff files)"
     )
+    # the other programs as program 0 is: each base with this version's update in one file
+    for line in pack_other_programs(args, discovery, base_record.title_id, standalone_version=update_version):
+        print(f"packed {line}")
     return 0
 
 
@@ -92,6 +100,9 @@ def pack_single_flow(args, discovery, tlvs, title_id) -> int:
         tlvs=tlvs,
     )
     print(f"packed {out}: base, {len(record.files)} files")
+    # program<N>/ beside exefs/ and romfs/: each program in its own container, beside out (SPEC §4.1)
+    for line in pack_other_programs(args, discovery, record.title_id, out=out, version=version):
+        print(f"packed {line}")
     return 0
 
 
@@ -113,9 +124,7 @@ def pack_bundle_flow(args, discovery, tlvs, title_id, kind, application_id=None)
             for line in pack_other_programs(args, discovery, application):
                 print(f"packed {line}")
         return result
-    # the console layout's base/program/0[/program]/ names nothing: name it after the bundle
-    console_layout = Path(discovery.base_dir) != Path(args.source) / "base"
-    stem = args.name or (bundle_stem(args) if console_layout else None)
+    stem = program0_stem(args, discovery)
     base_out = args.out or default_name(discovery.base_dir, "base", 0, stem)
     title = resolve_title_id(title_id, discovery.base_dir)
     base_tlvs, update_tlvs = split_display_version(tlvs) if discovery.updates else (tlvs, {})
@@ -148,35 +157,72 @@ def name_stem(name: str | None) -> str | None:
     return (stem + "_" if windows_name_problem(stem) else stem) or None
 
 
-def pack_other_programs(args, discovery, application_id: int) -> list[str]:
-    """The programs other than 0 (SPEC §4.1), each in its own containers."""
+def program0_stem(args, discovery) -> str | None:
+    """The name of a bundle's program 0 containers: --name, else the bundle's
+    when its folders name nothing (the console layout's base/program/0/ and
+    updates/<v>/program/0/) or the title has other programs, named after the
+    bundle too (pack_other_programs); else None, the folder's own name."""
+    if discovery.mode == "content":
+        return None   # a content folder is named by its folder, as ever
+    if args.name:
+        return name_stem(args.name)
+    source = Path(args.source)
+    console_layout = (discovery.base_dir is not None and Path(discovery.base_dir) != source / "base") or \
+        any(Path(update).parent != source / "updates" for update in discovery.updates.values())
+    return bundle_stem(args) if console_layout or discovery.programs else None
+
+
+def pack_other_programs(args, discovery, application_id: int, *, out: str | None = None,
+                        version: int = 0, standalone_version: int | None = None) -> list[str]:
+    """The programs other than 0 (SPEC §4.1), each in its own containers,
+    beside program 0's (out, else -o) and named after it; version: their
+    bases' (a single content folder's, as program 0's); standalone_version:
+    a --kind standalone pack's, each base with that version's update in one
+    file (§5.3) as program 0's, else the base alone."""
     if not discovery.programs:
         return []
     written = []
-    stem = out_stem(args.out) if args.out else bundle_stem(args)
+    place = out or args.out
+    stem = out_stem(place) if place else bundle_stem(args)
+
+    def placed(name: str) -> str:
+        return str(Path(place).parent / name) if place else name
+
     for index, dump in sorted(discovery.programs.items()):
         if dump.base_dir is None:
             # SPEC §5.2: a program that arrived in an update has no base to diff against
-            for version in sorted(dump.updates):
-                out = beside_out(args, default_name(dump.updates[version], "standalone", version, stem, index))
+            for update_version in sorted(dump.updates):
+                standalone = placed(default_name(dump.updates[update_version], "standalone",
+                                                 update_version, stem, index))
                 pack_base_container(
-                    out, dump.updates[version],
-                    title_id=program_title_id(dump.updates[version], application_id, index),
-                    version=version, program_index=index, application_id=application_id,
+                    standalone, dump.updates[update_version],
+                    title_id=program_title_id(dump.updates[update_version], application_id, index),
+                    version=update_version, program_index=index, application_id=application_id,
                 )
-                written.append(out)
+                written.append(standalone)
             continue
-        base_out = beside_out(args, default_name(dump.base_dir, "base", 0, stem, index))
+        title = program_title_id(dump.base_dir, application_id, index)
+        if standalone_version is not None:
+            if standalone_version in dump.updates:
+                pair = placed(default_name(dump.base_dir, "standalone", standalone_version, stem, index))
+                pack_standalone_container(pair, dump.base_dir, dump.updates[standalone_version],
+                                          update_version=standalone_version, base_title_id=title,
+                                          base_version=version, program_index=index,
+                                          application_id=application_id)
+                written.append(pair)
+                continue
+            dump = replace(dump, updates={})   # its other versions are not this pack's, as program 0's are not
+        base_out = placed(default_name(dump.base_dir, "base", 0, stem, index))
         pack_base_container(
             base_out, dump.base_dir,
-            title_id=program_title_id(dump.base_dir, application_id, index),
-            program_index=index, application_id=application_id,
+            title_id=title,
+            version=version, program_index=index, application_id=application_id,
             control_fallback=newest_control(dump.updates),
         )
         written.append(base_out)
-        for version in sorted(dump.updates):
-            update_out = beside_out(args, default_name(dump.updates[version], "update", version, stem, index))
-            pack_update_container(update_out, dump.updates[version], base_out, version=version,
+        for update_version in sorted(dump.updates):
+            update_out = placed(default_name(dump.updates[update_version], "update", update_version, stem, index))
+            pack_update_container(update_out, dump.updates[update_version], base_out, version=update_version,
                                   application_id=application_id)
             written.append(update_out)
     return written

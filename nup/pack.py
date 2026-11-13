@@ -131,11 +131,16 @@ def pack_standalone_container(
     base_tlvs: dict[int, bytes] | None = None,
     update_tlvs: dict[int, bytes] | None = None,
     update_title_id: int | None = None,
+    program_index: int = 0,
+    application_id: int | None = None,
 ) -> tuple[PackageRecord, PackageRecord]:
     """Base and its diff in one container so the pair travels together (§5.3).
     A base packed from a dump without Control content takes its identity from
-    the update's (SPEC §3.1)."""
-    base_record, base_blobs = load_or_pack_base(base, base_title_id, base_version, base_tlvs, control_fallback=update_dir)
+    the update's (SPEC §3.1). program_index, application_id: a base packed
+    from a dump that is another program than 0 (SPEC §4.1)."""
+    base_record, base_blobs = load_or_pack_base(base, base_title_id, base_version, base_tlvs,
+                                                control_fallback=update_dir, program_index=program_index,
+                                                application_id=application_id)
     update_input = PackageInput(
         Kind.UPDATE,
         update_dir,
@@ -164,7 +169,8 @@ def application_of(base_record: PackageRecord) -> int:
 
 
 def load_or_pack_base(base: str, title_id, version: int, tlvs,
-                      control_fallback: str | None = None) -> tuple[PackageRecord, list[Blob]]:
+                      control_fallback: str | None = None, program_index: int = 0,
+                      application_id: int | None = None) -> tuple[PackageRecord, list[Blob]]:
     if base.endswith(".nup") and os.path.isfile(base):
         _reader, base_record = load_base_for_diff(base)
         return base_record, reuse_container_blobs_from(base, base_record)
@@ -172,7 +178,8 @@ def load_or_pack_base(base: str, title_id, version: int, tlvs,
         raise NupError("standalone packing from a dump dir needs --title-id")
     packed = pack_tree_package(
         PackageInput(Kind.BASE, base, version=version, title_id=title_id, tlvs=tlvs or {},
-                     control_fallback=control_fallback),
+                     control_fallback=control_fallback, program_index=program_index,
+                     application_id=application_id or 0),
         first_entry_index=1,
     )
     return packed.record, packed.blobs

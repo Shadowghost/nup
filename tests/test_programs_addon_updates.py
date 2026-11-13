@@ -91,6 +91,36 @@ def test_every_container_goes_beside_the_out_file(console_bundle: Path, tmp_path
         "Game.nup", "Game.program1.standalone.update.327680.nup", "Game.update.327680.nup"]
 
 
+def test_standalone_and_update_packs_name_the_console_layout_after_the_bundle(
+        console_bundle: Path, tmp_path: Path, monkeypatch) -> None:
+    """updates/<v>/program/0/ names nothing: program 0's containers take the bundle's name
+    in every flow, as the other programs' do."""
+    monkeypatch.chdir(tmp_path)
+    assert nup_main(["pack", str(console_bundle), "--kind", "standalone"]) == 0
+    assert sorted(p.name for p in tmp_path.glob("*.nup")) == [
+        "Wonder.program1.standalone.update.327680.nup", "Wonder.standalone.update.327680.nup"]
+    assert nup_main(["pack", str(console_bundle), "-o", "Wonder.nup"]) == 0
+    (tmp_path / "Wonder.update.327680.nup").unlink()
+    assert nup_main(["pack", str(console_bundle), "--base", "Wonder.nup"]) == 0
+    assert (tmp_path / "Wonder.update.327680.nup").is_file()
+
+
+def test_a_standalone_pack_packs_every_program_standalone(tmp_path: Path, monkeypatch) -> None:
+    """--kind standalone: program 1's base and its update of that version travel together
+    as program 0's do, not as an update that needs a base from elsewhere."""
+    root = tmp_path / "Kirby"
+    make_dump(root / "base/program/0", title_id=APP, seed=b"base")
+    make_dump(root / "base/program/1", title_id=APP + 1, seed=b"s2")
+    make_dump(root / "updates/65536/program/0", title_id=APP, seed=b"upd")
+    make_dump(root / "updates/65536/program/1", title_id=APP + 1, seed=b"s2 upd")
+    monkeypatch.chdir(tmp_path)
+    assert nup_main(["pack", str(root), "--kind", "standalone"]) == 0
+    assert sorted(p.name for p in tmp_path.glob("*.nup")) == [
+        "Kirby.program1.standalone.update.65536.nup", "Kirby.standalone.update.65536.nup"]
+    assert packages(tmp_path / "Kirby.program1.standalone.update.65536.nup")[0] == [
+        (Kind.BASE, APP + 1, 0, 1, APP), (Kind.UPDATE, APP + 1 + 0x800, 65536, 1, APP)]
+
+
 def test_addon_update(console_bundle: Path, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     assert nup_main(["pack", str(console_bundle), "--kind", "dlc"]) == 0
@@ -125,6 +155,81 @@ def test_yoink_layout(tmp_path: Path) -> None:
                      "--title-id", f"{APP:x}"]) == 0
     with read_container(str(out)) as reader:
         assert not any(row.path == "romfs.img" for row in reader.meta.packages[0].files)
+
+
+def test_flattened_program_folder(tmp_path: Path, monkeypatch) -> None:
+    """updates/<v>/program1/ beside exefs/ and romfs/ (a flattened dump that keeps a Switch 2
+    Edition's program 1 with its version): program 1, and not in program 0's files."""
+    root = tmp_path / "Kirby"
+    make_dump(root / "base", title_id=APP, seed=b"base")
+    make_dump(root / "updates/65536", title_id=APP, seed=b"upd")
+    make_dump(root / "updates/65536/program1", title_id=S2_PROGRAM, seed=b"s2")
+    put(root / "updates/65536/program1/romfs/s2.bin", b"switch 2" * 50)
+    put(root / "updates/65536/programX/romfs/x.bin", b"not a program")   # no index: program 0's
+    found = discover_dumps(str(root))
+    assert sorted(found.updates) == [65536] and sorted(found.programs) == [1]
+    assert Path(found.programs[1].updates[65536]) == root / "updates/65536/program1"
+    monkeypatch.chdir(tmp_path)
+    assert nup_main(["pack", str(root), "--name", "Kirby"]) == 0
+    with read_container(str(tmp_path / "Kirby.update.65536.nup")) as reader:
+        paths = {row.path for row in reader.meta.packages[0].files}
+    assert not any(p.startswith("program1/") for p in paths) and "programX/romfs/x.bin" in paths
+    records, _flags = packages(tmp_path / "Kirby.program1.standalone.update.65536.nup")
+    assert records == [(Kind.BASE, S2_PROGRAM, 65536, 1, APP)]
+
+
+def test_a_zero_padded_program_folder_is_a_program(tmp_path: Path) -> None:
+    root = tmp_path / "Pad"
+    make_dump(root / "base", title_id=APP, seed=b"base")
+    make_dump(root / "base/program01", title_id=APP + 1, seed=b"one")
+    found = discover_dumps(str(root))
+    assert sorted(found.programs) == [1] and Path(found.programs[1].base_dir) == root / "base/program01"
+
+
+def test_flattened_programs_share_the_bundles_name(tmp_path: Path, monkeypatch) -> None:
+    """Without --name, program 0 of a title with several programs is named after the
+    bundle as program 1 is, not after its base/ folder."""
+    root = tmp_path / "Kirby"
+    make_dump(root / "base", title_id=APP, seed=b"base")
+    make_dump(root / "base/program1", title_id=APP + 1, seed=b"s2")
+    make_dump(root / "updates/65536", title_id=APP, seed=b"upd")
+    monkeypatch.chdir(tmp_path)
+    assert nup_main(["pack", str(root)]) == 0
+    assert sorted(p.name for p in tmp_path.glob("*.nup")) == [
+        "Kirby.nup", "Kirby.program1.nup", "Kirby.update.65536.nup"]
+
+
+def test_content_folder_with_a_program_folder(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A single content folder (exefs/ and romfs/ at the top) with program1/ beside them:
+    program 1 packs into its own container, not into program 0's and not dropped."""
+    root = tmp_path / "Kirby"
+    make_dump(root, title_id=APP, seed=b"base")
+    make_dump(root / "program1", title_id=S2_PROGRAM, seed=b"s2")
+    found = discover_dumps(str(root))
+    assert found.mode == "content" and Path(found.programs[1].base_dir) == root / "program1"
+    monkeypatch.chdir(tmp_path)
+    assert nup_main(["pack", str(root)]) == 0
+    with read_container(str(tmp_path / "Kirby.nup")) as reader:
+        assert not any(row.path.startswith("program1/") for row in reader.meta.packages[0].files)
+    assert packages(tmp_path / "Kirby.program1.nup")[0] == [(Kind.BASE, S2_PROGRAM, 0, 1, APP)]
+    # --base diffs program 0 only: the other program is named, not silently skipped
+    capsys.readouterr()
+    assert nup_main(["pack", str(root), "--base", str(tmp_path / "Kirby.nup"), "--version", "65536",
+                     "-o", str(tmp_path / "u.nup")]) == 0
+    assert "program 1, not packed" in capsys.readouterr().err
+
+
+def test_version_folder_with_only_another_program(tmp_path: Path) -> None:
+    """updates/<v>/ holding only program1/ is program 1's update, not an empty one of program 0;
+    base/ holding only program1/ is no base of program 0."""
+    root = tmp_path / "Kirby"
+    make_dump(root / "base/program1", title_id=S2_PROGRAM, seed=b"s2")
+    make_dump(root / "updates/65536", title_id=APP, seed=b"upd")
+    make_dump(root / "updates/131072/program1", title_id=S2_PROGRAM, seed=b"s2 upd")
+    found = discover_dumps(str(root))
+    assert found.base_dir is None and sorted(found.updates) == [65536]
+    assert Path(found.programs[1].base_dir) == root / "base/program1"
+    assert sorted(found.programs[1].updates) == [131072]
 
 
 def test_program_only_bundle_needs_the_application_id(tmp_path: Path, monkeypatch, capsys) -> None:
