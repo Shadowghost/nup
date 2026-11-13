@@ -134,9 +134,13 @@ NOT_IN_FILE_NAMES = re.compile(r'\s*[<>:"/\\|?*\x00-\x1f]+\s*')
 def name_stem(name: str | None) -> str | None:
     """--name as a file name stem: it is the title's name ('Zelda: Tears of the
     Kingdom'), so what a file name cannot hold on any host becomes ' - '."""
+    from .tree import windows_name_problem
+
     if not name:
         return None
-    return NOT_IN_FILE_NAMES.sub(" - ", name).strip(" .-") or None
+    stem = NOT_IN_FILE_NAMES.sub(" - ", name).strip(" .-")
+    # a device name (CON, AUX, ...) is no file on Windows, whatever follows the dot
+    return (stem + "_" if windows_name_problem(stem) else stem) or None
 
 
 def pack_other_programs(args, discovery, application_id: int) -> list[str]:

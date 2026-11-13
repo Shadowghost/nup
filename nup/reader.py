@@ -63,10 +63,23 @@ class NupReader:
                 f"data region starts at {self.data_start:#x}: the string table must be "
                 "padded so entry data lands on 0x200 boundaries"
             )
-        for entry in self.entries:
+        for index, entry in enumerate(self.entries):
             if entry.data_offset % ALIGN:
                 raise NupError(f"entry {entry.name!r} data offset is not 0x200-aligned")
+            if self.data_start + entry.data_offset + entry.size > self.file_size:
+                raise NupError(f"entry {entry.name!r} lies outside the container (SPEC §6.4)")
+            expected = 0 if index == 0 else min(entry.size, ALIGN)
+            if entry.hashed_size != expected:
+                raise NupError(
+                    f"entry {entry.name!r} hashed size {entry.hashed_size:#x} is not {expected:#x} (SPEC §2)"
+                )
         self._index_by_name = {entry.name: i for i, entry in enumerate(self.entries)}
+        if len(self._index_by_name) != len(self.entries):
+            seen: set[str] = set()
+            for entry in self.entries:
+                if entry.name in seen:
+                    raise NupError(f"entry name {entry.name!r} appears twice (SPEC §6.4)")
+                seen.add(entry.name)
         if self.entries[0].name != META_NAME:
             raise NupError("the first container entry is not meta.nup")
         for entry in self.entries[1:]:

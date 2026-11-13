@@ -20,7 +20,7 @@ from .layout import (
 from .diff import sorted_identity
 from .model import scope_of
 from .reader import NupReader
-from .tree import parse_deleted_manifest
+from .tree import check_extract_paths, parse_deleted_manifest, safe_target
 
 
 @dataclass(slots=True)
@@ -51,11 +51,13 @@ def extract_package(
     flatten: bool = False,
     verify: bool = True,
 ) -> ExtractReport:
-    target_root = out_dir if flatten else os.path.join(out_dir, scope_of(record))
+    # the scope folders (base/, update/<v>/) are written through as the files are: never a link
+    target_root = out_dir if flatten else safe_target(out_dir, scope_of(record))
     report = ExtractReport(roots=[target_root])
+    check_extract_paths(target_root, [row.path for row in record.files])
     for offset, row in enumerate(record.files):
         entry = reader.entries[record.first_entry_index + offset]
-        target = Path(target_root, *row.path.split("/"))
+        target = Path(safe_target(target_root, row.path))
         target.parent.mkdir(parents=True, exist_ok=True)
         copy_verified(reader, entry, row, target, verify)
         report.files_written += 1
@@ -168,7 +170,7 @@ def materialize_addon_updates(
         apply_updates(reader, [patch], states[owner], report)
         identities[owner] = identity_of(states[owner])
     for addon, state in zip(addons, states):
-        target = os.path.join(out_dir, scope_of(addon))
+        target = safe_target(out_dir, scope_of(addon))
         write_state(state, target, verify, report)
         report.roots.append(target)
     return report
@@ -234,9 +236,10 @@ def identity_of(state: State) -> bytes:
 
 def write_state(state: State, out_dir: str, verify: bool, report: ExtractReport) -> None:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
+    check_extract_paths(out_dir, list(state))
     for path, (row, (reader, index)) in sorted(state.items()):
         entry = reader.entries[index]
-        target = Path(out_dir, *path.split("/"))
+        target = Path(safe_target(out_dir, path))
         target.parent.mkdir(parents=True, exist_ok=True)
         copy_verified(reader, entry, row, target, verify)
         report.files_written += 1

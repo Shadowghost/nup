@@ -427,6 +427,36 @@ carry (§3); a base package's `base content hash` field is all zero.
 
 Emulators SHOULD default to bind + lazy.
 
+### 6.4 Hostile containers
+
+A `.nup` from anywhere else is untrusted input: whoever wrote it can
+recompute every hash in §6.1, so the hashes prove integrity, not origin.
+These rules keep a reader, extractor or packer safe from a crafted file.
+
+Readers MUST, before reading or allocating anything a count or size
+names:
+
+1. Bound every count, offset and size against the file size, and cap the
+   meta record at a sane size (the reference tool: 2 GiB).
+2. Reject an entry that lies outside the file, a `hashed size` other
+   than `min(size, 0x200)` (0 for meta.nup, §2), and two entries with the
+   same name (names are case-sensitive bytes).
+3. Reject names that are absolute, contain empty, `.` or `..`
+   components, or a backslash (§2).
+
+Extractors (anything that writes entries to a host filesystem) MUST:
+
+4. Never write outside the output folder, and never write through a
+   link that already exists under it.
+5. Refuse, not rewrite, a name the target filesystem cannot hold (a name
+   it reserves, a character it forbids, a trailing character it drops).
+6. Refuse, not overwrite, two names that differ only in case or in
+   Unicode normalization when the target folder folds them (found by
+   probing the folder).
+
+Packers MUST NOT follow links in a dump: a link is an error, not content
+and not something to skip silently.
+
 ## 7. Content handling
 
 - **ExeFS**: stored decrypted, one file per entry (`exefs/main`,
@@ -509,9 +539,9 @@ Packing that update dump alone emits one base container, display version
    with room to spare; confirm no dump ships bigger, or the `tlv size`
    field has to widen (a layout change). Packagers SHOULD error loudly
    on overflow, not truncate.
-4. **Windows path hazards.** Names are case-sensitive bytes, so two
-   case-variant paths collide on case-insensitive filesystems. v1 had the
-   same issue; carry over the policy.
+4. **Path hazards - RESOLVED (§6.4).** Names stay case-sensitive
+   bytes; extractors refuse names a target cannot hold and case-variant
+   pairs on a folder that folds case, instead of altering or overwriting.
 5. **Content hash width - RATIFIED 2026-11-06.** The record carries the
    full 0x20-byte digest in both identity fields (§3); the fixed
    record part grows 0x38 -> 0x68 bytes, trivial against a multi-MB

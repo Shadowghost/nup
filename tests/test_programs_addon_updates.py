@@ -546,6 +546,7 @@ def test_a_title_name_makes_a_safe_file_name() -> None:
     assert name_stem("Zelda: Tears of the Kingdom") == "Zelda - Tears of the Kingdom"
     assert name_stem("AC/DC Live?") == "AC - DC Live"
     assert name_stem("Plain") == "Plain" and name_stem(None) is None
+    assert name_stem("CON") == "CON_" and name_stem("aux") == "aux_"
 
 
 def test_a_bundle_of_addons_alone_needs_the_dlc_kind(tmp_path: Path, capsys) -> None:

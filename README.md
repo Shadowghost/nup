@@ -58,6 +58,10 @@ other programs pack into `<name>.program<N>...` files (§4.1); `--kind dlc` writ
 (§5.4), materialized with `nup extract <name>.dlc.update.nup --base <name>.dlc.nup
 --apply`.
 
+Containers from elsewhere are untrusted (§6.4): the reader refuses crafted
+tables, `extract` never writes through links or merges names a folder cannot
+tell apart, and `pack` refuses links in a dump.
+
 ## v1
 
 The v1 format SPEC (own container, per-file zstd, TOC hashes) and its 
