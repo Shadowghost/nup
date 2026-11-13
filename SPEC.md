@@ -457,6 +457,46 @@ Extractors (anything that writes entries to a host filesystem) MUST:
 Packers MUST NOT follow links in a dump: a link is an error, not content
 and not something to skip silently.
 
+### 6.5 Known-good lists
+
+Authenticity without keys: a list of package states known to be good,
+published by whoever vouches for them, against which anyone checks a
+container. The key is the content hash (§6.2), so a state matches however
+it was containered (split, standalone, re-packed).
+
+A list (`.nuplist`, RECOMMENDED) is UTF-8 text, LF line ends, tab-separated:
+
+```
+#nuplist 1
+content_hash	kind	title_id	version	program	files	bytes	name
+9d2a...e1	base	040074a01bf12000	0	0	75242	10737418240	Donkey Kong Bananza 1.0.0
+```
+
+- First line exactly `#nuplist 1`; then an optional column header line
+  (the first column `content_hash`), `#` comment lines and blank lines
+  anywhere after it.
+- `content_hash`: 64 lowercase hex digits, the materialized-state
+  identity of §6.2 (an update's or add-on update's is the state after
+  applying it).
+- `kind`: `base`, `update`, `addon` or `addon_update`; `title_id`: 16 hex
+  digits; `version` and `program` (§4.1): decimal.
+- `files`, `bytes`: file count and total size of the materialized state,
+  or `-` when the list's author did not know them (a diff packed without
+  its base).
+- `name`: free text to the end of the line, no tabs.
+- Several lists may be used together; the same hash may appear in more
+  than one.
+
+A checker looks every package up by content hash. A base's or add-on's
+hash is recomputed from its file table rather than taken from the record;
+a diff's stored hash is the identity of the state it produces and can be
+recomputed by materializing it (§5.1); until it is, the container only
+claims it. A package is **known** when its
+hash is listed with the same kind, title id, version and program (and the
+same `files` and `bytes` when both sides give them). Only a check after
+hashing the file data (`package` or `full`, §6.3) says the data is
+the listed state; after `bind` it says only that the file *claims* it.
+
 ## 7. Content handling
 
 - **ExeFS**: stored decrypted, one file per entry (`exefs/main`,

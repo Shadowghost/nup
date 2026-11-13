@@ -60,7 +60,19 @@ other programs pack into `<name>.program<N>...` files (§4.1); `--kind dlc` writ
 
 Containers from elsewhere are untrusted (§6.4): the reader refuses crafted
 tables, `extract` never writes through links or merges names a folder cannot
-tell apart, and `pack` refuses links in a dump.
+tell apart, and `pack` refuses links in a dump.  Known-good lists (§6.5) check
+a container against package states someone vouches for, without keys:
+
+```sh
+nup hashlist DonkeyKongBananza.nup DonkeyKongBananza.update.458752.nup \
+    --base DonkeyKongBananza.nup -o known.nuplist
+nup verify game.nup --against known.nuplist   # hashes every byte; exit 0 only if every package is known
+nup verify game.update.458752.nup --against known.nuplist --base game.nup
+```
+
+An update's (or add-on update's) content hash is the state it produces, so
+it is proven only by recomputing it on the containers it lands on (`--base`);
+without them, and after `--level bind`, the container only *claims* a state.
 
 ## v1
 

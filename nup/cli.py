@@ -1,6 +1,7 @@
 """Command line interface: pack, info, verify, extract, edit."""
 
 import argparse
+from contextlib import ExitStack
 import json
 import os
 import sys
@@ -49,10 +50,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = sub.add_parser("verify", help="check container integrity")
     verify.add_argument("file")
-    verify.add_argument("--level", choices=("bind", "package", "full"), default="bind")
-    verify.add_argument("--package", default=None, help="package scope for --level package")
+    verify.add_argument("--level", choices=("bind", "package", "full"), default=None,
+                        help="default: bind, or full with --against")
+    verify.add_argument("--package", default=None,
+                        help="package scope for --level package (the level it implies without --level)")
+    verify.add_argument("--against", action="append", default=[], metavar="LIST",
+                        help="known-good list(s) to look every package up in (SPEC §6.5)")
+    verify.add_argument("--base", action="append", default=[], metavar="NUP",
+                        help="with --against: container(s) an update or add-on update lands on "
+                        "(base, earlier updates, dlc), to recompute its content hash")
     verify.add_argument("--json", action="store_true")
     verify.set_defaults(handler=command_verify)
+
+    hashlist = sub.add_parser("hashlist", help="write known-good list lines for containers (SPEC §6.5)")
+    hashlist.add_argument("files", nargs="+")
+    hashlist.add_argument("-o", "--out", help="list file to write (default: stdout)")
+    hashlist.add_argument("--base", action="append", default=[], metavar="NUP",
+                          help="container(s) the updates or add-on updates land on, to recompute "
+                          "their content hash and state size")
+    hashlist.set_defaults(handler=command_hashlist)
 
     extract = sub.add_parser("extract", help="write container entries to a directory")
     add_extract_arguments(extract)
@@ -100,39 +116,118 @@ def command_info(args) -> int:
 def command_verify(args) -> int:
     from .verify import verify_container
 
-    with NupReader(args.file) as reader:
-        report = verify_container(reader, args.level, args.package)
+    if args.base and not args.against:
+        raise NupError("--base recomputes content hashes for --against; pass a known-good list")
+    # --package names what to hash: without --level it means --level package
+    level = args.level or ("package" if args.package else "full" if args.against else "bind")
+    with ExitStack() as stack:
+        # a base's data counts as hashed only when the file's is (--level full)
+        bases = open_verified(stack, args.base, "bind" if level == "bind" else "full")
+        reader = stack.enter_context(NupReader(args.file))
+        report = verify_container(reader, level, args.package)
+        # --level package looks up the package(s) it hashed, not the ones left out
+        only = set(report.packages_checked) if level == "package" else None
+        matches = against_lists(reader, args.against, set(report.packages_checked), bases, only) \
+            if args.against else []
     if args.json:
-        print(json.dumps(report.as_dict(), indent=2))
+        payload = report.as_dict()
+        if args.against:
+            payload["known"] = [
+                {"package": m.label, "content_hash": m.entry.content_hash, "known": m.ok,
+                 "listed": m.known is not None, "name": m.known.name if m.known else None,
+                 "problem": m.problem, "unverified": m.unverified}
+                for m in matches
+            ]
+        print(json.dumps(payload, indent=2))
     else:
         print(
             f"{args.file}: {report.level} verification passed "
             f"({report.entries_hashed} entries, {report.bytes_hashed:,} bytes hashed)"
         )
+        for m in matches:
+            print(f"  {m.label}: {match_state(m)}")
+    return 0 if all(m.ok for m in matches) else 1
+
+
+def match_state(m) -> str:
+    if m.problem:
+        return m.problem
+    if m.known is None:
+        return "not in the list(s)" + (f" ({m.unverified})" if m.unverified else "")
+    name = m.known.name or m.known.source
+    # after bind, or for a diff not materialized, the file only claims the state (SPEC §6.5)
+    return f"claims: {name}; not proven: {m.unverified}" if m.unverified else f"known: {name}"
+
+
+def open_verified(stack: ExitStack, paths: list[str], level: str) -> list[NupReader]:
+    """Containers open on stack, each verified at level before its file table
+    counts toward a diff's recomputed content hash."""
+    from .verify import verify_container
+
+    bases = []
+    for path in paths:
+        base = stack.enter_context(read_container(path))
+        verify_container(base, level)
+        bases.append(base)
+    return bases
+
+
+def against_lists(reader, paths: list[str], hashed: set[str], bases, only: set[str] | None = None):
+    from .hashlist import check_against, read_lists
+
+    return check_against(reader, read_lists(paths), hashed=hashed, bases=bases, only=only)
+
+
+def command_hashlist(args) -> int:
+    from .hashlist import entry_of, format_list, materialized_states
+    from .layout import DIFF_KINDS
+    from .verify import package_label
+
+    entries = []
+    with ExitStack() as stack:
+        # list what the data is, not what the meta claims: a diff's state takes
+        # the unchanged files from its base, so the base's data is hashed too;
+        # a diff lands on a base listed beside it as on one given with --base
+        bases = open_verified(stack, args.base, "full")
+        readers = open_verified(stack, args.files, "full")
+        states = materialized_states([*bases, *readers])
+        for path, reader in zip(args.files, readers):
+            for record in reader.meta.packages:
+                if record.kind in DIFF_KINDS and id(record) not in states:
+                    print(f"nup: warning: {path}: {package_label(reader, record)}: content hash taken "
+                          "from the container, not recomputed (pass --base with the container(s) "
+                          "it lands on)", file=sys.stderr)
+                entry = entry_of(reader, record, states.get(id(record)))
+                if entry.content_hash != record.content_hash.hex():
+                    # what verify --against reports as a problem is no state to vouch for
+                    raise NupError(f"{path}: {package_label(reader, record)}: the stored content hash "
+                                   "does not match the state its data makes; not listed")
+                entries.append(entry)
+    text = format_list(entries)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+    else:
+        sys.stdout.write(text)
     return 0
 
 
 def command_extract(args) -> int:
     from .extract import extract_with_options, summarize
 
-    base_reader = read_container(args.base) if args.base else None
-    chain = [read_container(link) for link in args.chain]
-    try:
-        with NupReader(args.file) as reader:
-            report = extract_with_options(
-                reader,
-                args.out,
-                package=args.package,
-                apply=args.apply,
-                base_reader=base_reader,
-                chain=chain,
-                verify=not args.no_verify,
-            )
-    finally:
-        for link in chain:
-            link.close()
-        if base_reader is not None:
-            base_reader.close()
+    with ExitStack() as stack:   # every container opened is closed, also when a later one fails to open
+        base_reader = stack.enter_context(read_container(args.base)) if args.base else None
+        chain = [stack.enter_context(read_container(link)) for link in args.chain]
+        reader = stack.enter_context(NupReader(args.file))
+        report = extract_with_options(
+            reader,
+            args.out,
+            package=args.package,
+            apply=args.apply,
+            base_reader=base_reader,
+            chain=chain,
+            verify=not args.no_verify,
+        )
     print(summarize(report))
     return 0
 

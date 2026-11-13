@@ -203,6 +203,9 @@ def overlay_update_rows(reader: NupReader, record: PackageRecord, rows: dict[str
         if row.path == DELETED_NAME:
             entry = reader.entries[record.first_entry_index + offset]
             for removed in parse_deleted_manifest(reader.read_entry_bytes(entry)):
-                rows.pop(removed, None)
+                # as extract.apply_updates refuses it: no state is proven that no reader builds
+                if rows.pop(removed, None) is None:
+                    raise NupError(f"the v{record.version} @deleted manifest names {removed!r}, "
+                                   "which the tree does not contain")
             continue
         rows[row.path] = row
