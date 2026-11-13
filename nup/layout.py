@@ -245,10 +245,19 @@ def parse_tlvs(data: memoryview) -> dict[int, bytes]:
     return tlvs
 
 
+def localized_tag(lang: str) -> bytes:
+    """A localized record's language tag: ASCII, at most 255 bytes (u8 length)."""
+    if not lang.isascii():
+        raise NupError(f"language tag {lang!r} is not ASCII (a BCP 47 tag, e.g. ja or en-GB)")
+    if len(lang) > 0xFF:
+        raise NupError(f"language tag {lang[:20]!r}... is longer than 255 characters")
+    return lang.encode("ascii")
+
+
 def encode_localized(records: dict[str, bytes]) -> bytes:
     out = bytearray()
     for lang in sorted(records):
-        lang_bytes = lang.encode("ascii")
+        lang_bytes = localized_tag(lang)
         value = records[lang]
         out.append(len(lang_bytes))
         out += lang_bytes
@@ -267,7 +276,10 @@ def parse_localized(data: memoryview) -> dict[str, bytes]:
         pos += 1
         if pos + lang_len + 2 > len(data):
             raise NupError("localized record overruns the TLV")
-        lang = bytes(data[pos : pos + lang_len]).decode("ascii").lower()
+        try:
+            lang = bytes(data[pos : pos + lang_len]).decode("ascii").lower()
+        except UnicodeDecodeError:
+            raise NupError("localized record language tag is not ASCII") from None
         pos += lang_len
         value_len, = struct.unpack_from("<H", data, pos)
         pos += 2

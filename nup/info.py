@@ -1,5 +1,6 @@
 """Container info: JSON-ready description and a human rendering."""
 
+from .errors import NupError
 from .identity import title_number
 from .layout import ADDON_OFFSET, PATCH_OFFSET, TlvType, TEXT_TLV_TYPES, parse_localized
 from .model import scope_of
@@ -57,15 +58,24 @@ def package_info(reader: NupReader, record) -> dict:
         "content_hash": record.content_hash.hex(),
         "base_content_hash": render_base_hash(record),
         "tlv_types": sorted(record.tlvs),
-        "localized_languages": sorted(
-            parse_localized(record.tlvs[TlvType.LOCALIZED_TITLE])
-        ) if TlvType.LOCALIZED_TITLE in record.tlvs else [],
+        "localized_languages": localized_languages(record),
         "conformance": conformance_notes(reader, record),
     }
     icon = record.tlvs.get(TlvType.ICON)
     if icon is not None:
         payload["icon_bytes"] = len(icon)
     return payload
+
+
+def localized_languages(record) -> list[str]:
+    """Languages of the localized title TLV; a malformed one is reported, not fatal (PR #37)."""
+    value = record.tlvs.get(TlvType.LOCALIZED_TITLE)
+    if value is None:
+        return []
+    try:
+        return sorted(parse_localized(memoryview(value)))
+    except NupError:
+        return []
 
 
 def render_base_hash(record) -> str:
@@ -99,6 +109,11 @@ def conformance_notes(reader: NupReader, record) -> list[str]:
     if record.program_index and record.kind.name == "BASE" and \
             title_number(record.title_id) != title_number(application) + record.program_index:
         notes.append("program title id is not application id + program index (SPEC §4.1)")
+    if TlvType.LOCALIZED_TITLE in record.tlvs:
+        try:
+            parse_localized(memoryview(record.tlvs[TlvType.LOCALIZED_TITLE]))
+        except NupError as error:
+            notes.append(f"localized title TLV is malformed: {error} (SPEC §3)")
     return notes
 
 

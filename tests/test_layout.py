@@ -44,6 +44,14 @@ def test_package_record_fixed_part_is_0x68_bytes_ending_before_tlvs():
     assert PACKAGE_FIXED_SIZE == 0x68
 
 
+def test_malformed_localized_record_is_a_nup_error():
+    """Issue #36: a damaged localized record fails as NupError, never a raw decode error."""
+    from nup.layout import parse_localized
+    for bad in (b"\x02\xff\xfe\x01\x00x", b"\x05ab", b"\x02ja\x05\x00ab"):
+        with pytest.raises(NupError):
+            parse_localized(memoryview(bad))
+
+
 def test_tlv_roundtrip():
     encoded = encode_tlv(int(TlvType.TITLE_NAME), b"Donkey Kong Bananza")
     assert parse_tlvs(memoryview(encoded)) == {int(TlvType.TITLE_NAME): b"Donkey Kong Bananza"}
@@ -133,3 +141,9 @@ def test_spec_issues_registry_is_loaded():
         "switch2-title-id-namespace",
     }
     assert expected <= set(SPEC_ISSUES)
+
+
+@pytest.mark.parametrize("tag", ["é", "x" * 256])
+def test_localized_tag_must_fit_the_record(tag: str) -> None:
+    with pytest.raises(NupError, match="language tag"):
+        encode_localized({tag: b"name"})
