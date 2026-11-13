@@ -46,8 +46,10 @@ nup edit  game.nup --add-file base/romfs/x.bin=./x.bin
 `edit` changes the container's only package, or its base, unless `--package` names
 another (a scope label such as `addon/2`, `base`, `update`, or an index);
 `--display-version` then names the newest update it holds, as in `pack`.  `--icon` and `--lang-icon` keep a
-JPEG that fits the 64 KiB metadata block as is; a PNG or an oversized image
-becomes a 256x256 JPEG, which needs Pillow (`pip install .[images]`).
+JPEG within its TLV's 1 MiB cap as is (console icons are 150-250 KB); a PNG
+or a larger image becomes a 256x256 JPEG, which needs Pillow
+(`pip install .[images]`).  `--icon` is the image for every language, as in
+`pack`: it removes the localized icons; `--lang-icon` gives one anew.
 
 `pack` accepts a content directory (`exefs/` + `romfs/`), a dump bundle
 (`base/`, `updates/<version>/`, `dlc/`), or an update-only dump, which is

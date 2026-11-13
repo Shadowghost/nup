@@ -39,7 +39,7 @@ def test_struct_widths_match_the_documented_layout():
 
 
 def test_package_record_fixed_part_is_0x68_bytes_ending_before_tlvs():
-    layout = "<BBHQQII32s32sQB3s"  # 0x64: program index, then 3 reserved bytes (SPEC §4.1)
+    layout = "<BBBBIQQII32s32sQ"  # 0x02: program index (SPEC §4.1), 0x04: u32 tlv size (§3, §10.3)
     assert PACKAGE_RECORD.format == layout
     assert PACKAGE_FIXED_SIZE == 0x68
 
@@ -57,11 +57,25 @@ def test_tlv_roundtrip():
     assert parse_tlvs(memoryview(encoded)) == {int(TlvType.TITLE_NAME): b"Donkey Kong Bananza"}
 
 
-def test_tlv_length_is_u16_capped(spec_issue):
-    assert spec_issue("worked-example-counts") is not None
+def test_tlv_length_is_capped_at_1_mib(spec_issue):
+    """u16 type + u16 reserved + u32 length; one value at most 1 MiB (SPEC §3, §10.3)"""
+    import struct
+    assert spec_issue("tlv-size") is not None
     with pytest.raises(NupError):
-        encode_tlv(int(TlvType.ICON), b"\0" * 0x10000)
-    assert encode_tlv(int(TlvType.ICON), b"\0" * 0xFFFF)
+        encode_tlv(int(TlvType.ICON), b"\0" * 0x100001)
+    console_icon = b"\xff\xd8\xff" + b"\0" * 204_000   # a console icon: 150-250 KB, past the old 64 KiB
+    encoded = encode_tlv(int(TlvType.ICON), console_icon)
+    assert encoded[:8] == struct.pack("<HHI", TlvType.ICON, 0, len(console_icon))
+    assert parse_tlvs(memoryview(encoded)) == {int(TlvType.ICON): console_icon}
+    assert encode_tlv(int(TlvType.ICON), b"\0" * 0x100000)
+
+
+def test_tlv_reader_refuses_a_reserved_field_and_an_oversized_length():
+    import struct
+    with pytest.raises(NupError, match="reserved"):
+        parse_tlvs(memoryview(struct.pack("<HHI", 5, 1, 1) + b"x"))
+    with pytest.raises(NupError, match="cap"):
+        parse_tlvs(memoryview(struct.pack("<HHI", 3, 0, 0x100001)))
 
 
 @pytest.fixture
@@ -106,9 +120,9 @@ def test_localized_records_roundtrip_with_v1_framing():
     assert len(decoded) == 2
 
 
-def test_localized_record_framing_is_u8_lang_u16_value():
+def test_localized_record_framing_is_u8_lang_u32_value():
     encoded = encode_localized({"fr": b"value"})
-    assert encoded == bytes([2]) + b"fr" + (5).to_bytes(2, "little") + b"value"
+    assert encoded == bytes([2]) + b"fr" + (5).to_bytes(4, "little") + b"value"
 
 
 def test_file_rows_roundtrip():

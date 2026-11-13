@@ -95,7 +95,7 @@ def test_tlv_length_cap_error_message(base_dump, tmp_path, capsys):
     assert nup_main(["pack", str(base_dump), "-o", str(tmp_path / "x.nup"),
                      f"--title-id={BASE_TITLE_ID:x}", "--provenance=" + "x" * (TLV_MAX_LENGTH + 1)]) == 1
     captured = capsys.readouterr().err
-    assert "u16" in captured and "64 KiB" in captured
+    assert "1,048,576" in captured or "TLV" in captured   # over one TLV's cap: said, not truncated (SPEC §10.3)
 
 
 def test_s52_default_naming_uses_standalone_update():

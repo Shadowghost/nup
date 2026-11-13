@@ -1,9 +1,9 @@
 """Icon images for the icon TLVs (SPEC §3, §3.1).
 
 The console ships icons as square JPEGs (256x256 on Switch 1), and the
-TLVs carry them the same way.  A JPEG that fits what is left of the
-package's 64 KiB TLV block is stored byte for byte; anything else (a PNG,
-an oversized JPEG) is converted to a 256x256 JPEG, which needs Pillow
+TLVs carry them the same way.  A JPEG within its TLV's cap (1 MiB, SPEC §3)
+is stored byte for byte; anything else (a PNG, a larger JPEG) is
+converted to a 256x256 JPEG, which needs Pillow
 (``pip install nup[images]``).
 """
 
@@ -23,13 +23,13 @@ def is_jpeg(data: bytes) -> bool:
 def prepare_icon(data: bytes, budget: int, source: str = "icon") -> bytes:
     """``data`` as a JPEG of at most ``budget`` bytes."""
     if budget <= 0:
-        raise NupError(f"{source}: no room left in the 64 KiB TLV block for an icon (SPEC §10.3)")
+        raise NupError(f"{source}: no room left in its TLV for an icon (SPEC §3)")
     if is_jpeg(data) and len(data) <= budget:
         return data
     try:
         from PIL import Image
     except ImportError:
-        reason = (f"is {len(data):,} bytes, over the {budget:,} left in the 64 KiB TLV block"
+        reason = (f"is {len(data):,} bytes, over the {budget:,} its TLV has room for"
                   if is_jpeg(data) else "is not a JPEG")
         raise NupError(
             f"{source} {reason}; install Pillow (pip install nup[images]) to convert it, "
@@ -51,8 +51,21 @@ def prepare_icon(data: bytes, budget: int, source: str = "icon") -> bytes:
         raise NupError(f"{source} cannot be converted to a JPEG: {error}") from None
     raise NupError(
         f"{source}: even at JPEG quality {QUALITIES[-1]} the icon exceeds the "
-        f"{budget:,} bytes left in the 64 KiB TLV block (SPEC §10.3)"
+        f"{budget:,} bytes its TLV has room for (SPEC §3)"
     )
+
+
+def add_localized_icon(tlvs: dict[int, bytes], lang: str, data: bytes, source: str) -> None:
+    """Set one language's record of the localized icon TLV, the image fitted
+    (prepare_icon) to what the TLV's cap leaves once the other languages and
+    this record's own framing are in; tlvs is unchanged when it cannot be."""
+    from .layout import TLV_MAX_LENGTH, TlvType, encode_localized, parse_localized
+
+    records = parse_localized(memoryview(tlvs.get(TlvType.LOCALIZED_ICON, b"")))
+    records[lang.lower()] = b""
+    room = TLV_MAX_LENGTH - len(encode_localized(records))
+    records[lang.lower()] = prepare_icon(data, room, source)
+    tlvs[TlvType.LOCALIZED_ICON] = encode_localized(records)
 
 
 def to_square(image, Image):

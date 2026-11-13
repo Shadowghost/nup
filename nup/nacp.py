@@ -18,7 +18,7 @@ TITLE_PUBLISHER_SIZE = 0x100
 DISPLAY_VERSION_OFFSET = 0x3060
 DISPLAY_VERSION_SIZE = 0x10
 NACP_MIN_SIZE = DISPLAY_VERSION_OFFSET + DISPLAY_VERSION_SIZE
-TLV_HEADER_SIZE = 4
+LOCALIZED_RECORD_OVERHEAD = 1 + 16 + 4   # u8 tag length, a tag (at most "zh-Hant"), u32 value length
 
 # NACP title slots in order, the console's icon file name for each, and the
 # BCP 47 tag the localized TLVs carry (SPEC §3.1).
@@ -168,26 +168,53 @@ def control_tlvs(control: ControlData, *, identity: bool) -> dict[int, bytes]:
     return tlvs
 
 
-def control_icon(control: ControlData, tlvs: dict[int, bytes]) -> bytes | None:
-    """The default language's icon in what is left of the 64 KiB TLV block
-    (SPEC §3.1, §10.3): as it is when it fits, else re-encoded as a smaller
-    256x256 JPEG (image.prepare_icon, with Pillow); None when it cannot be
-    made to fit (no Pillow, an image Pillow cannot read, no room left)."""
-    from .errors import NupError
-    from .image import prepare_icon
+def default_icon_path(control: ControlData) -> str | None:
     default = control.default_language
     path = control.icons.get(default) if default else None
-    if path is None:
-        path = next(iter(control.icons.values()), None)
+    return path if path is not None else next(iter(control.icons.values()), None)
+
+
+def control_icon(control: ControlData) -> bytes | None:
+    """The default language's icon (SPEC §3.1): the console's file as it is
+    when it is within one TLV's cap (1 MiB: every console icon is), else
+    re-encoded as a 256x256 JPEG that is (image.prepare_icon, with Pillow);
+    None when it cannot be (no Pillow, an image Pillow cannot read)."""
+    from .errors import NupError
+    from .image import prepare_icon
+    path = default_icon_path(control)
     if path is None:
         return None
-    used = sum(TLV_HEADER_SIZE + len(value) for value in tlvs.values())
-    budget = TLV_MAX_LENGTH - used - TLV_HEADER_SIZE
     with open(path, "rb") as handle:
         data = handle.read()
-    if len(data) <= budget:
-        return data   # the console's file as it is
+    if len(data) <= TLV_MAX_LENGTH:
+        return data
     try:
-        return prepare_icon(data, budget, source=os.path.basename(path))
+        return prepare_icon(data, TLV_MAX_LENGTH, source=os.path.basename(path))
     except NupError:
         return None
+
+
+def control_localized_icons(control: ControlData, default_icon: bytes | None,
+                            given: dict[str, bytes] | None = None) -> bytes | None:
+    """The localized icon TLV (SPEC §3.1): every other language's icon whose
+    bytes differ from the default's (readers fall back to the default for
+    the rest; a title usually ships one image for all), as they are, while
+    the TLV stays within its cap; None when no language differs. given: the
+    records the caller set (--lang-icon), which win over their languages'
+    console icons and take their room first."""
+    records: dict[str, bytes] = dict(given or {})
+    taken = {tag.lower() for tag in records}
+    size = len(encode_localized(records))
+    default_path = default_icon_path(control)
+    for tag, path in control.icons.items():
+        if path == default_path or tag.lower() in taken:
+            continue
+        with open(path, "rb") as handle:
+            data = handle.read()
+        if data == default_icon:
+            continue
+        if size + LOCALIZED_RECORD_OVERHEAD + len(data) > TLV_MAX_LENGTH:
+            continue   # left out: that language falls back to the default icon
+        records[tag] = data
+        size += LOCALIZED_RECORD_OVERHEAD + len(data)
+    return encode_localized(records) if records else None

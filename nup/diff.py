@@ -24,7 +24,7 @@ from .layout import (
     scope_prefix,
 )
 from .model import PackageRecord
-from .nacp import control_icon, control_tlvs, read_control
+from .nacp import control_icon, control_localized_icons, control_tlvs, read_control
 from .reader import NupReader, read_container
 from .tree import (
     encode_deleted_manifest,
@@ -112,10 +112,20 @@ def merged_tlvs(content_dir: str, overrides: dict[int, bytes] | None,
             tlvs.update(borrowed)
     if overrides:
         tlvs.update(localized_merged(tlvs, overrides))
-    if control is not None and kind is Kind.BASE and TlvType.ICON not in tlvs:
-        icon = control_icon(control, tlvs)
-        if icon is not None:
-            tlvs[TlvType.ICON] = icon
+    default_icon = control_icon(control) if control is not None and kind is Kind.BASE else None
+    if default_icon is not None and TlvType.ICON not in tlvs:
+        tlvs[TlvType.ICON] = default_icon
+    # the console's other-language icons stand beside its default one: an icon the
+    # caller gives replaces the image for every language, so none of them apply,
+    # unless it is that default icon itself (nup convert passes v1's, mostly the
+    # tree's); a --lang-icon replaces its own language's and the others stay
+    icon_given = bool(overrides) and TlvType.ICON in overrides and overrides[TlvType.ICON] != default_icon
+    if control is not None and kind is Kind.BASE and not icon_given:
+        given = tlvs.get(TlvType.LOCALIZED_ICON)
+        localized = control_localized_icons(control, tlvs.get(TlvType.ICON),
+                                            parse_localized(memoryview(given)) if given else None)
+        if localized is not None:
+            tlvs[TlvType.LOCALIZED_ICON] = localized
     return tlvs
 
 

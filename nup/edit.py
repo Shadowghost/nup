@@ -190,29 +190,22 @@ def apply_tlv_ops(reader: NupReader, records: list[PackageRecord], ops: EditOps,
 
 
 def apply_icons(record: PackageRecord, ops: EditOps, report: EditReport) -> None:
-    """Images go in last, each fitted to what the text TLVs leave of the
-    64 KiB block (SPEC §10.3)."""
-    from .image import prepare_icon
-
-    if ops.icon is not None:
-        record.tlvs.pop(TlvType.ICON, None)
-        record.tlvs[TlvType.ICON] = prepare_icon(ops.icon, tlv_budget(record), "--icon")
-        report.tlvs_set += 1
-    for lang, data in ops.lang_icons.items():
-        merge_localized(record.tlvs, TlvType.LOCALIZED_ICON, lang, b"")
-        # the record framing for this language is now in the block: u8 + tag + u16
-        icon = prepare_icon(data, tlv_budget(record), f"--lang-icon {lang}")
-        merge_localized(record.tlvs, TlvType.LOCALIZED_ICON, lang, icon)
-        report.tlvs_set += 1
-
-
-def tlv_budget(record: PackageRecord) -> int:
-    """Bytes a value may still add to the record's TLV block: the block
-    and every single TLV are capped at 0xFFFF (SPEC §3)."""
+    """Images go in last, each within its TLV's cap (1 MiB, SPEC §3): stored
+    as they are when they fit, else converted (image.prepare_icon)."""
+    from .image import add_localized_icon, prepare_icon
     from .layout import TLV_MAX_LENGTH
 
-    used = sum(4 + len(value) for value in record.tlvs.values())
-    return TLV_MAX_LENGTH - used - (0 if TlvType.ICON in record.tlvs else 4)
+    if ops.icon is not None:
+        record.tlvs[TlvType.ICON] = prepare_icon(ops.icon, TLV_MAX_LENGTH, "--icon")
+        report.tlvs_set += 1
+        # the image for every language, as `nup pack --icon` gives it (diff.merged_tlvs):
+        # the console's other-language icons no longer apply; --lang-icon adds its own
+        if record.tlvs.pop(TlvType.LOCALIZED_ICON, None) is not None:
+            report.tlvs_removed += 1
+            report.warnings.append("--icon replaces every language's icon: the localized icons were removed")
+    for lang, data in ops.lang_icons.items():
+        add_localized_icon(record.tlvs, lang, data, f"--lang-icon {lang}")
+        report.tlvs_set += 1
 
 
 def select_record(reader: NupReader, records: list[PackageRecord], selector: str | None) -> PackageRecord:

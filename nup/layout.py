@@ -76,12 +76,16 @@ TEXT_TLV_TYPES = frozenset(
     }
 )
 
-TLV_MAX_LENGTH = 0xFFFF
+TLV_TYPE_MAX = 0xFFFF
+TLV_MAX_LENGTH = 0x100000   # one TLV value at most 1 MiB: room for console icons (150-250 KB) with a bound readers check (SPEC §3, §6.4)
+TLV_HEADER = struct.Struct("<HHI")   # type, reserved (zero), length: v1's meta block framing
+TLV_HEADER_SIZE = TLV_HEADER.size
 
 CONTAINER_HEADER = struct.Struct("<4sIII")
 CONTAINER_ENTRY = struct.Struct("<QQIIQ32s")
 META_HEADER = struct.Struct("<4sHHIIQ32sII")
-PACKAGE_RECORD = struct.Struct("<BBHQQII32s32sQB3s")
+# kind, flags, program index, reserved, tlv size, title, application, version, file count, content hash, base content hash, first entry index
+PACKAGE_RECORD = struct.Struct("<BBBBIQQII32s32sQ")
 assert CONTAINER_HEADER.size == HEADER_SIZE
 assert CONTAINER_ENTRY.size == ENTRY_SIZE
 assert META_HEADER.size == META_HEADER_SIZE
@@ -136,8 +140,16 @@ SPEC_ISSUES: dict[str, str] = {
     ),
     "localized-tlv-framing": (
         "SPEC §3 describes the localized TLVs only as 'lang bytes + value', "
-        "with no length framing.  Resolution: the v1 convention is carried "
-        "over: u8 lang length, lang bytes, u16 value length, value bytes."
+        "with no length framing.  Resolution: u8 lang length, lang bytes, "
+        "u32 value length, value bytes (v1's u16 value length widened with "
+        "the TLV block, so localized icons fit: see tlv-size)."
+    ),
+    "tlv-size": (
+        "§10.3: a u16 TLV length and a u16 block size (64 KiB) cannot hold a "
+        "console icon (150-250 KB).  Decided 2026-11-13: the record's tlv "
+        "size is u32, a TLV is u16 type + u16 reserved + u32 length (v1's "
+        "meta block framing), one value is at most 1 MiB (TLV_MAX_LENGTH), "
+        "and the program index moved to record byte 0x02 to make room."
     ),
     "worked-example-counts": (
         "The draft §8 example said 1,306 changed / 3,452 total entries.  "
@@ -150,7 +162,7 @@ SPEC_ISSUES: dict[str, str] = {
     "multi-program": (
         "§10.10 left multi-program titles open.  Resolution (SPEC §4.1): "
         "one program per container, the program index in the package "
-        "record's former reserved byte 0x64, the application id on another "
+        "record's byte 0x02 (0x64 until the tlv size widened), the application id on another "
         "program's base.  Part of v2, not a feature flag: every reader "
         "keeps programs apart."
     ),
@@ -220,24 +232,32 @@ def parse_file_rows(data: memoryview, count: int, offset: int) -> list[FileRow]:
 
 
 def encode_tlv(tlv_type: int, value: bytes) -> bytes:
-    if not 0 <= tlv_type <= TLV_MAX_LENGTH:
+    if not 0 <= tlv_type <= TLV_TYPE_MAX:
         raise NupError(f"TLV type {tlv_type:#x} exceeds u16")
     if len(value) > TLV_MAX_LENGTH:
         raise NupError(
-            f"TLV {tlv_type:#x} payload of {len(value)} bytes exceeds the "
-            f"u16 length cap {TLV_MAX_LENGTH} (SPEC §10.3)"
+            f"TLV {tlv_type:#x} payload of {len(value):,} bytes exceeds the "
+            f"{TLV_MAX_LENGTH:,}-byte cap of one TLV (SPEC §3)"
         )
-    return struct.pack("<HH", tlv_type, len(value)) + value
+    return TLV_HEADER.pack(tlv_type, 0, len(value)) + value
+
+
+def tlv_block_size(tlvs: dict[int, bytes]) -> int:
+    return sum(TLV_HEADER_SIZE + len(value) for value in tlvs.values())
 
 
 def parse_tlvs(data: memoryview) -> dict[int, bytes]:
     tlvs: dict[int, bytes] = {}
     pos = 0
     while pos < len(data):
-        if pos + 4 > len(data):
+        if pos + TLV_HEADER_SIZE > len(data):
             raise NupError("TLV header overruns the TLV block")
-        tlv_type, length = struct.unpack_from("<HH", data, pos)
-        pos += 4
+        tlv_type, reserved, length = TLV_HEADER.unpack_from(data, pos)
+        pos += TLV_HEADER_SIZE
+        if reserved:
+            raise NupError(f"TLV {tlv_type:#x} reserved field is not zero")
+        if length > TLV_MAX_LENGTH:
+            raise NupError(f"TLV {tlv_type:#x} of {length:,} bytes exceeds the {TLV_MAX_LENGTH:,}-byte cap (SPEC §3)")
         if pos + length > len(data):
             raise NupError(f"TLV {tlv_type:#x} value overruns the TLV block")
         tlvs[tlv_type] = bytes(data[pos : pos + length])
@@ -261,7 +281,7 @@ def encode_localized(records: dict[str, bytes]) -> bytes:
         value = records[lang]
         out.append(len(lang_bytes))
         out += lang_bytes
-        out += struct.pack("<H", len(value))
+        out += struct.pack("<I", len(value))
         out += value
     return bytes(out)
 
@@ -274,15 +294,17 @@ def parse_localized(data: memoryview) -> dict[str, bytes]:
             raise NupError("localized record overruns the TLV")
         lang_len = data[pos]
         pos += 1
-        if pos + lang_len + 2 > len(data):
+        if pos + lang_len > len(data):
             raise NupError("localized record overruns the TLV")
         try:
             lang = bytes(data[pos : pos + lang_len]).decode("ascii").lower()
         except UnicodeDecodeError:
             raise NupError("localized record language tag is not ASCII") from None
         pos += lang_len
-        value_len, = struct.unpack_from("<H", data, pos)
-        pos += 2
+        if pos + 4 > len(data):
+            raise NupError("localized record overruns the TLV")
+        value_len, = struct.unpack_from("<I", data, pos)
+        pos += 4
         if pos + value_len > len(data):
             raise NupError("localized record value overruns the TLV")
         records[lang] = bytes(data[pos : pos + value_len])

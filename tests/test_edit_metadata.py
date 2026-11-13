@@ -91,6 +91,21 @@ def test_localized_names_and_icons(base_nup: Path, tmp_path: Path) -> None:
     assert parse_localized(memoryview(tlvs[TlvType.LOCALIZED_ICON])) == {"ja": JPEG}
 
 
+def test_icon_flag_replaces_every_languages_icon(base_nup: Path, tmp_path: Path) -> None:
+    """--icon is the image for every language, as `nup pack --icon` gives it: the
+    localized icons go, unless --lang-icon gives one anew."""
+    icon = tmp_path / "ja.jpg"
+    icon.write_bytes(JPEG)
+    assert nup_main(["edit", str(base_nup), "--lang-icon", f"ja={icon}"]) == 0
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(JPEG + b"cover")
+    assert nup_main(["edit", str(base_nup), "--icon", str(cover)]) == 0
+    tlvs = tlvs_of(base_nup)
+    assert tlvs[TlvType.ICON] == JPEG + b"cover" and TlvType.LOCALIZED_ICON not in tlvs
+    assert nup_main(["edit", str(base_nup), "--icon", str(cover), "--lang-icon", f"ja={icon}"]) == 0
+    assert parse_localized(memoryview(tlvs_of(base_nup)[TlvType.LOCALIZED_ICON])) == {"ja": JPEG}
+
+
 def test_non_jpeg_without_pillow_is_refused(base_nup: Path, tmp_path: Path, monkeypatch, capsys) -> None:
     import builtins
 
@@ -118,7 +133,7 @@ def test_png_and_oversized_images_become_a_256_jpeg(base_nup: Path, tmp_path: Pa
     assert nup_main(["edit", str(base_nup), "--icon", str(png)]) == 0
     icon = tlvs_of(base_nup)[TlvType.ICON]
     assert icon.startswith(b"\xff\xd8\xff")
-    assert len(icon) <= 0xFFFF
+    assert len(icon) <= 0x100000   # within one TLV's cap (SPEC §3)
     assert Image.open(io.BytesIO(icon)).size == (256, 256)
 
 

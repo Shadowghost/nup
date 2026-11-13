@@ -169,28 +169,94 @@ def test_parse_nacp_reads_a_compressed_title_area() -> None:
     assert control.display_version == "1.2.1"
 
 
-def test_oversized_icon_is_reencoded_to_fit(tmp_path: Path) -> None:
-    """Console icons are often 150-200 KB: with Pillow the packer stores a 256x256 JPEG that fits (SPEC §3.1)."""
-    pil = pytest.importorskip("PIL.Image")
-    import io, os
+def test_console_sized_icons_are_stored_as_distributed(tmp_path: Path) -> None:
+    """Console icons are 150-250 KB, past the old 64 KiB block: the default one byte for byte, the other languages'
+    in the localized icon TLV where they differ from it (SPEC §3, §3.1, §10.3)."""
     content = make_dump(tmp_path / "big", title_id=APP, seed=b"b")
-    add_control(content, "1.0.0")
-    noise = pil.frombytes("RGB", (512, 512), os.urandom(512 * 512 * 3))   # random pixels: a JPEG far over 64 KiB
-    big = io.BytesIO(); noise.save(big, format="JPEG", quality=100)
-    assert big.tell() > 0x10000
-    for icon in (content / "control").glob("icon_*.dat"):
-        icon.write_bytes(big.getvalue())
+    add_control(content, "1.0.0", icon_size=200_000)   # each language's bytes differ (add_control repeats its name)
     out = tmp_path / "big.nup"
     assert nup_main(["pack", str(content), "-o", str(out)]) == 0
+    record = record_of(out)
+    control = content / "control"
+    assert record.tlvs[TlvType.ICON] == (control / "icon_AmericanEnglish.dat").read_bytes()
+    localized = parse_localized(memoryview(record.tlvs[TlvType.LOCALIZED_ICON]))
+    assert localized == {"ja": (control / "icon_Japanese.dat").read_bytes(),
+                         "en-gb": (control / "icon_BritishEnglish.dat").read_bytes()}
+
+
+def test_icon_flag_replaces_every_languages_icon(tmp_path: Path) -> None:
+    """--icon replaces the console's image: its other-language icons are not added beside it."""
+    content = make_dump(tmp_path / "big", title_id=APP, seed=b"b")
+    add_control(content, "1.0.0", icon_size=200_000)
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"\xff\xd8\xff\xe0" + b"new cover" * 100)
+    out = tmp_path / "big.nup"
+    assert nup_main(["pack", str(content), "-o", str(out), "--icon", str(cover)]) == 0
+    record = record_of(out)
+    assert record.tlvs[TlvType.ICON] == cover.read_bytes()
+    assert TlvType.LOCALIZED_ICON not in record.tlvs
+
+
+def test_icon_flag_naming_the_trees_own_icon_keeps_the_other_languages(tmp_path: Path) -> None:
+    """--icon control/icon_<default>.dat is the console's image, not a new one for every language."""
+    content = make_dump(tmp_path / "big", title_id=APP, seed=b"b")
+    add_control(content, "1.0.0", icon_size=200_000)
+    default = content / "control/icon_AmericanEnglish.dat"
+    default.write_bytes(b"\xff\xd8\xff" + default.read_bytes())   # a JPEG --icon keeps as it is
+    out = tmp_path / "big.nup"
+    assert nup_main(["pack", str(content), "-o", str(out), "--icon", str(default)]) == 0
+    assert set(parse_localized(memoryview(record_of(out).tlvs[TlvType.LOCALIZED_ICON]))) == {"ja", "en-gb"}
+
+
+def test_lang_icon_flag_keeps_the_other_languages_icons(tmp_path: Path) -> None:
+    """--lang-icon replaces its own language's icon: the console's other ones stay."""
+    content = make_dump(tmp_path / "big", title_id=APP, seed=b"b")
+    add_control(content, "1.0.0", icon_size=200_000)
+    korean = tmp_path / "ko.jpg"
+    korean.write_bytes(b"\xff\xd8\xff\xe0" + b"korean" * 100)
+    out = tmp_path / "big.nup"
+    assert nup_main(["pack", str(content), "-o", str(out), "--lang-icon", f"ko={korean}"]) == 0
+    localized = parse_localized(memoryview(record_of(out).tlvs[TlvType.LOCALIZED_ICON]))
+    control = content / "control"
+    assert localized == {"ko": korean.read_bytes(),
+                         "ja": (control / "icon_Japanese.dat").read_bytes(),
+                         "en-gb": (control / "icon_BritishEnglish.dat").read_bytes()}
+
+
+def test_one_image_for_every_language_is_stored_once(tmp_path: Path) -> None:
+    content = make_dump(tmp_path / "same", title_id=APP, seed=b"s")
+    add_control(content, "1.0.0")
+    for icon in (content / "control").glob("icon_*.dat"):
+        icon.write_bytes(b"\xff\xd8\xff" + b"one image" * 20_000)
+    out = tmp_path / "same.nup"
+    assert nup_main(["pack", str(content), "-o", str(out)]) == 0
+    record = record_of(out)
+    assert len(record.tlvs[TlvType.ICON]) == 3 + 9 * 20_000
+    assert TlvType.LOCALIZED_ICON not in record.tlvs
+
+
+def test_icon_over_the_cap_is_reencoded(tmp_path: Path) -> None:
+    """An icon over one TLV's 1 MiB cap is stored as a 256x256 JPEG within it, with Pillow (SPEC §3.1)."""
+    pil = pytest.importorskip("PIL.Image")
+    import io, os
+    content = make_dump(tmp_path / "huge", title_id=APP, seed=b"h")
+    add_control(content, "1.0.0")
+    noise = pil.frombytes("RGB", (1024, 1024), os.urandom(1024 * 1024 * 3))   # random pixels: a JPEG over 1 MiB
+    big = io.BytesIO(); noise.save(big, format="JPEG", quality=100)
+    assert big.tell() > 0x100000
+    for icon in (content / "control").glob("icon_*.dat"):
+        icon.write_bytes(big.getvalue())
+    out = tmp_path / "huge.nup"
+    assert nup_main(["pack", str(content), "-o", str(out)]) == 0
     icon = record_of(out).tlvs[TlvType.ICON]
-    assert icon[:3] == b"\xff\xd8\xff" and len(icon) < 0x10000
+    assert icon[:3] == b"\xff\xd8\xff" and len(icon) <= 0x100000
     assert pil.open(io.BytesIO(icon)).size == (256, 256)
 
 
-def test_icon_left_out_when_it_does_not_fit(tmp_path: Path) -> None:
-    """An oversized icon that is no image Pillow can read is left out (the name still comes from the NACP)."""
+def test_icon_left_out_when_it_cannot_fit(tmp_path: Path) -> None:
+    """An icon over the cap that is no image Pillow can read is left out (the name still comes from the NACP)."""
     content = make_dump(tmp_path / "big", title_id=APP, seed=b"b")
-    add_control(content, "1.0.0", icon_size=0x12000)
+    add_control(content, "1.0.0", icon_size=0x200000)   # (add_control's sizes scale with the language name: all over 1 MiB)
     out = tmp_path / "big.nup"
     assert nup_main(["pack", str(content), "-o", str(out)]) == 0
     record = record_of(out)

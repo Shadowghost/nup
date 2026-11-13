@@ -126,23 +126,23 @@ then P package records, fixed part 0x68 bytes:
   0x01  u8    flags    bit0 = diff (incremental against base content hash;
                         MUST be set for kinds 1 and 3, clear otherwise;
                         see §5)
-  0x02  u16   tlv size (extra metadata after the fixed 0x68 bytes; the
-                        whole TLV block must also fit this u16, i.e.
-                        64 KiB)
-  0x04  u64   title id          (base / patch / addon id)
-  0x0C  u64   application id    (base title id; 0 for kind=base of
+  0x02  u8    program index     (§4.1; 0 for kinds 2 and 3)
+  0x03  u8    reserved (zero)
+  0x04  u32   tlv size          (bytes of TLVs after the fixed 0x68 bytes)
+  0x08  u64   title id          (base / patch / addon id)
+  0x10  u64   application id    (base title id; 0 for kind=base of
                         program 0, program 0's title id for another
                         program's base, §4.1)
-  0x14  u32   version           (NCM-style u32, e.g. 0x70000 = rev 7)
-  0x18  u32   file count        (entries under this package scope)
-  0x1C  0x20  content hash      (package identity, §6.2)
-  0x3C  0x20  base content hash (package state this diff applies to;
+  0x18  u32   version           (NCM-style u32, e.g. 0x70000 = rev 7)
+  0x1C  u32   file count        (entries under this package scope)
+  0x20  0x20  content hash      (package identity, §6.2)
+  0x40  0x20  base content hash (package state this diff applies to;
                         all zero if none)
-  0x5C  u64   first entry index (entries of this scope are contiguous)
-  0x64  u8    program index     (§4.1; 0 for kinds 2 and 3)
-  0x65  u8[3] reserved (zero)
-  0x68  ..    TLVs, u16 type + u16 length + value bytes, written in
-               ascending type order
+  0x60  u64   first entry index (entries of this scope are contiguous)
+  0x68  ..    TLVs, each u16 type + u16 reserved (zero) + u32 length +
+               value bytes (v1's meta block framing), written in
+               ascending type order; one value is at most 1 MiB
+               (0x100000), which readers MUST check
   ..    ..   file table, `file count` entries of:
              path (NUL-terminated UTF-8, package-relative)
              u64  size
@@ -172,13 +172,14 @@ TLV types are carried over from v1 so packers keep one code path:
 | 0x0004 | display version string (e.g. `3.2.0`) |
 | 0x0005 | title name, default language |
 | 0x0006 | publisher |
-| 0x0009 | localized title (records: u8 lang length, lang bytes, u16 value length, value; repeated per language) |
-| 0x000A | localized icon (same record framing) |
+| 0x0009 | localized title (records: u8 lang length, lang bytes, u32 value length, value; repeated per language) |
+| 0x000A | localized icon (same record framing): languages whose icon differs from the default |
 | 0x000B | build id (hex string, from ExeFS `main` NSO header) |
 | 0x000C | source dump provenance (tool, date) - optional |
 
-The localized record framing (u8 + lang + u16 + value) is carried over
-from v1 unchanged. **[DECIDED]**
+The localized record framing (u8 + lang + u32 + value) is v1's with the
+value length widened, as the TLV length and the record's tlv size are,
+so a console icon (150-250 KB) is stored as distributed. **[DECIDED]**
 
 Editors MUST preserve unknown TLV types; readers MUST ignore them.
 Identity TLVs (name, icon, publisher, localized sets) live on the
@@ -213,7 +214,8 @@ from it, per package, and let explicit values override field by field:
 | 0x0005 title name | name of the default language | base records |
 | 0x0006 publisher | publisher of the default language | base records |
 | 0x0009 localized title | every other language whose name differs from the default | base records |
-| 0x0003 icon | `icon_<default language>.dat`, only while the whole TLV block stays within 64 KiB; a larger one MAY be re-encoded as a 256x256 JPEG that fits (console icons are often 150-200 KB) | base records |
+| 0x0003 icon | `icon_<default language>.dat` as distributed (150-250 KB, within one TLV's 1 MiB cap); a larger one MAY be re-encoded as a 256x256 JPEG that fits | base records |
+| 0x000A localized icon | every other language's `icon_<language>.dat` whose bytes differ from the default's (most titles ship one image for all), while the TLV stays within its cap | base records |
 
 The default language is the first title slot with a non-empty name, in
 NACP order (0 AmericanEnglish, 1 BritishEnglish, 2 Japanese, 3 French,
@@ -301,7 +303,7 @@ per game.
 
 - Each program packs into containers of its own (§1 rule 7), with the
   same scope names (`base/`, `update/<version>/`) and rules as program 0;
-  the record's `program index` (0x64) says which program it is.
+  the record's `program index` (0x02) says which program it is.
 - A program other than 0 has its own title id, the program's NPDM id as
   is (§4): the application id + index in that program's platform range,
   so a Switch 2 Edition's program 1 of application `010015100B514000` is
@@ -621,15 +623,15 @@ Packing that update dump alone emits one base container, display version
    flags. Rejected for v2.0 to keep tools working.
 2. **SHA-3-256 second hash.** Switch 14.0.0+ moved to SHA-3 upstream.
    Worth a meta TLV carrying an optional parallel hash?
-3. **Icon size cap.** The per-TLV length and the per-record `tlv size`
-   field are both u16, so a package's whole TLV block must fit 64 KiB.
-   Console icons are 256x256 JPEGs of up to 0x20000 bytes each, one per
-   language, so the block cannot hold a title's icon set and may not
-   hold even its default icon. §3.1 therefore carries the default icon
-   only when it fits and no localized icons. Carrying them all needs a
-   wider `tlv size` (a layout change) or icons as entries (§7 forbids
-   that today). Packagers SHOULD error loudly when explicit TLVs
-   overflow, not truncate.
+3. **Icon size cap - RESOLVED 2026-11-13 (§3).** A u16 TLV length and
+   a u16 `tlv size` (64 KiB in all) could not hold a console icon:
+   Super Mario Bros. Wonder's are 176 KB, Kirby and the Forgotten
+   Land's 204 KB. The record's `tlv size` is now u32 (the program index
+   moved to byte 0x02 to make room) and a TLV is u16 type + u16
+   reserved + u32 length, v1's meta block framing, with one value at
+   most 1 MiB. Icons are stored as distributed; localized icons only
+   where they differ from the default. Packagers SHOULD error loudly
+   when explicit TLVs overflow, not truncate.
 4. **Path hazards - RESOLVED (§6.4).** Names stay case-sensitive
    bytes; extractors refuse names a target cannot hold and case-variant
    pairs on a folder that folds case, instead of altering or overwriting.
@@ -660,7 +662,7 @@ Packing that update dump alone emits one base container, display version
    dedup needs an entry-extension design on top of the codec work;
    deferred.
 10. **Multi-program titles - RESOLVED (§4.1).** One program per
-   container, its index in the record's former reserved byte 0x64, the
+   container, its index in the record's byte 0x02 (0x64 until §10.3), the
    application id on its base (issue #9.6). Add-on data patches likewise
    got kind 3 (§5.4).
 

@@ -10,7 +10,7 @@ from .discover import discover_dumps
 from .errors import NupError
 from .identity import require_title_id, resolve_identity
 from .edit import split_lang
-from .image import prepare_icon
+from .image import add_localized_icon, prepare_icon
 from .layout import PATCH_OFFSET, TLV_MAX_LENGTH, TlvType, merge_localized
 from .pack import (
     pack_addon_container,
@@ -458,10 +458,7 @@ def collect_tlvs(args) -> dict[int, bytes]:
         tlvs[TlvType.ICON] = prepare_icon(Path(args.icon).read_bytes(), TLV_MAX_LENGTH, "--icon")
     for spec in args.lang_icon:
         lang, path = split_lang(spec, "--lang-icon")
-        merge_localized(tlvs, TlvType.LOCALIZED_ICON, lang, b"")   # its framing counts against the cap
-        room = TLV_MAX_LENGTH - len(tlvs[TlvType.LOCALIZED_ICON])
-        merge_localized(tlvs, TlvType.LOCALIZED_ICON, lang,
-                        prepare_icon(Path(path).read_bytes(), room, f"--lang-icon {lang}"))
+        add_localized_icon(tlvs, lang, Path(path).read_bytes(), f"--lang-icon {lang}")
     return tlvs
 
 
