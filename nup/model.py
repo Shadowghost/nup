@@ -84,15 +84,32 @@ def build_string_table(names: list[str]) -> tuple[bytes, list[int]]:
 def encode_container_prefix(entries: list[ContainerEntry], table: bytes) -> bytes:
     out = bytearray()
     out += CONTAINER_HEADER.pack(HFS0_MAGIC, len(entries), len(table), 0)
+    offsets = string_offsets(table, len(entries))
     for entry in entries:
-        out += encode_container_entry(entry, table)
+        out += encode_container_entry(entry, table, offsets)
     out += table
     return bytes(out)
 
 
-def encode_container_entry(entry: ContainerEntry, table: bytes) -> bytes:
-    encoded_name = entry.name.encode("utf-8") + b"\x00"
-    name_offset = table.find(encoded_name)
+def string_offsets(table: bytes, count: int) -> dict[bytes, int]:
+    """Each name's own offset in the table, in one pass: a search per entry is
+    quadratic (a 250k-entry container spent minutes there), and can land
+    inside an earlier name that ends the same way."""
+    offsets: dict[bytes, int] = {}
+    position = 0
+    for _ in range(count):
+        end = table.find(b"\x00", position)
+        if end < 0:
+            break
+        offsets.setdefault(table[position:end], position)
+        position = end + 1
+    return offsets
+
+
+def encode_container_entry(entry: ContainerEntry, table: bytes,
+                           offsets: dict[bytes, int] | None = None) -> bytes:
+    encoded_name = entry.name.encode("utf-8")
+    name_offset = offsets.get(encoded_name, -1) if offsets is not None else table.find(encoded_name + b"\x00")
     if name_offset < 0:
         raise NupError(f"entry name {entry.name!r} missing from string table")
     return CONTAINER_ENTRY.pack(
