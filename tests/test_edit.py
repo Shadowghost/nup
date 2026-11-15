@@ -103,6 +103,68 @@ def test_in_place_edit(base_dump, tmp_path):
         assert reader.meta.packages[0].tlvs[TlvType.TITLE_NAME] == b"InPlace"
 
 
+@pytest.mark.parametrize("fixture", ["base_nup", "update_nup"])
+def test_metadata_patch_matches_a_full_rewrite(fixture, request, tmp_path):
+    """A TLV edit that fits meta.nup's padding patches the head only, and the
+    file comes out byte for byte as a rewrite through edit_container."""
+    import shutil
+    from nup.edit import patch_metadata_in_place
+    from nup.verify import verify_container
+
+    source = request.getfixturevalue(fixture)
+    ops = EditOps(set_tlvs={int(TlvType.DISPLAY_VERSION): b"1.0.0"}, package_selector="0")
+    rewritten = tmp_path / "rewritten.nup"
+    edit_container(str(source), str(rewritten), ops)
+    patched = tmp_path / "patched.nup"
+    shutil.copyfile(source, patched)
+    report = patch_metadata_in_place(str(patched), ops)
+    assert report is not None and report.tlvs_set == 1
+    assert patched.read_bytes() == rewritten.read_bytes()
+    with read_container(str(patched)) as reader:
+        verify_container(reader, "full")
+
+
+def test_a_bases_version_is_patched_in_place(base_nup, tmp_path):
+    """A full dump at a later revision stored as version 0: its version set
+    in place, as a rewrite would set it, its identity untouched."""
+    import shutil
+    from nup.edit import patch_metadata_in_place
+
+    ops = EditOps(version=917504)
+    rewritten = tmp_path / "rewritten.nup"
+    edit_container(str(base_nup), str(rewritten), ops)
+    patched = tmp_path / "patched.nup"
+    shutil.copyfile(base_nup, patched)
+    report = patch_metadata_in_place(str(patched), ops)
+    assert report is not None and report.version_set == 917504
+    assert patched.read_bytes() == rewritten.read_bytes()
+    with read_container(str(base_nup)) as before, read_container(str(patched)) as after:
+        assert after.meta.packages[0].version == 917504
+        assert after.meta.packages[0].content_hash == before.meta.packages[0].content_hash
+
+
+def test_an_updates_version_is_refused(update_nup, tmp_path):
+    with pytest.raises(NupError, match="repack it"):
+        edit_container(str(update_nup), str(tmp_path / "x.nup"), EditOps(version=1 << 16))
+
+
+def test_metadata_patch_declines_when_the_layout_moves(base_nup, tmp_path):
+    """meta.nup growing past its padding shifts every entry: the in-place edit
+    falls back to the full rewrite."""
+    import shutil
+    from nup.edit import edit_in_place, patch_metadata_in_place
+
+    ops = EditOps(set_tlvs={int(TlvType.PUBLISHER): b"P" * 0x1000})
+    copy = tmp_path / "copy.nup"
+    shutil.copyfile(base_nup, copy)
+    assert patch_metadata_in_place(str(copy), ops) is None
+    assert copy.read_bytes() == base_nup.read_bytes()
+    rewritten = tmp_path / "rewritten.nup"
+    edit_container(str(base_nup), str(rewritten), ops)
+    edit_in_place(str(copy), ops)
+    assert copy.read_bytes() == rewritten.read_bytes()
+
+
 def test_edited_container_verifies_full(base_nup, tmp_path):
     from nup.verify import verify_container
 

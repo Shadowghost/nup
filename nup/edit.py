@@ -30,11 +30,13 @@ class EditOps:
     replace_files: dict[str, str] = field(default_factory=dict)
     remove_files: set[str] = field(default_factory=set)
     base_path: str | None = None
+    version: int | None = None   # a base's or add-on's package version
 
 
 @dataclass(slots=True)
 class EditReport:
     output: str = ""
+    version_set: int | None = None
     tlvs_set: int = 0
     tlvs_removed: int = 0
     files_added: int = 0
@@ -167,7 +169,24 @@ def hash_new_file(record: PackageRecord, container_path: str, fs_path: str):
     return row, blob
 
 
+def apply_version(reader: NupReader, records: list[PackageRecord], ops: EditOps, report: EditReport) -> None:
+    """A base's or add-on's version: no scope names it (base/, addon/<i>/) and no
+    identity covers it. An update's is in its scope (update/<v>/) and orders
+    its chain, so it is repacked instead."""
+    if ops.version is None:
+        return
+    if not 0 <= ops.version <= 0xFFFFFFFF:
+        raise NupError(f"--version {ops.version} is not a u32")
+    record = select_record(reader, records, ops.package_selector)
+    if record.kind not in (Kind.BASE, Kind.ADDON):
+        raise NupError(f"--version changes a base's or add-on's version; a {record.kind.name.lower()}'s "
+                       "names its scope and orders its chain: repack it with `nup pack --version`")
+    record.version = ops.version
+    report.version_set = ops.version
+
+
 def apply_tlv_ops(reader: NupReader, records: list[PackageRecord], ops: EditOps, report: EditReport) -> None:
+    apply_version(reader, records, ops, report)
     if not (ops.set_tlvs or ops.del_tlvs or ops.lang_names or ops.icon is not None or ops.lang_icons):
         return   # file edits only: no package to pick
     record = select_record(reader, records, ops.package_selector)
@@ -245,11 +264,61 @@ def blobs_for(record: PackageRecord, blobs_by_path: dict[str, Blob]) -> list[Blo
 
 
 def edit_in_place(src: str, ops: EditOps) -> EditReport:
+    """Metadata-only edits patch the file's head where the entry data stays put;
+    anything else rewrites the container through a temporary file."""
+    report = patch_metadata_in_place(src, ops)
+    if report is not None:
+        return report
     tmp = src + ".edit.tmp"
     report = edit_container(src, tmp, ops)
     os.replace(tmp, src)
     report.output = src
     return report
+
+
+def patch_metadata_in_place(src: str, ops: EditOps) -> EditReport | None:
+    """A TLV edit only changes meta.nup and, through its size, the meta entry
+    and the header hash. When the new meta.nup still ends inside its 0x200
+    padding, every other entry keeps its offset: rewrite just the head
+    (container prefix + meta.nup + its padding), byte-identical to what a full
+    rewrite would produce there. None when the layout would move."""
+    from .layout import align_up
+    from .metarecord import meta_length
+    from .writer import build_prefix_and_meta, layout_entries
+
+    if ops.add_files or ops.replace_files or ops.remove_files:
+        return None
+    reader = read_container(src)
+    try:
+        records = clone_records(reader)
+        report = EditReport()
+        apply_tlv_ops(reader, records, ops, report)
+        from .rehash import recompute_identities
+
+        recompute_identities(reader, records, ops.base_path, report)
+        blobs = reusable_blobs(reader)
+        packed = [blob for record in records for blob in blobs_for(record, blobs)]
+        meta_len = meta_length(records)
+        entries, data_start = layout_entries(meta_len, packed)
+        if data_start != reader.data_start or align_up(meta_len) != align_up(reader.entries[0].size):
+            return None
+        if [entry_key(entry) for entry in entries[1:]] != [entry_key(entry) for entry in reader.entries[1:]]:
+            return None
+        total_files = sum(len(record.files) for record in records)
+        prefix_padded, meta_bytes = build_prefix_and_meta(entries, records, total_files, 0)
+    finally:
+        reader.close()
+    head = prefix_padded + meta_bytes + b"\x00" * (align_up(len(meta_bytes)) - len(meta_bytes))
+    with open(src, "r+b") as handle:
+        handle.write(head)
+        handle.flush()
+        os.fsync(handle.fileno())
+    report.output = src
+    return report
+
+
+def entry_key(entry) -> tuple:
+    return entry.name, entry.size, entry.data_offset, entry.hashed_size, entry.prefix_hash
 
 
 def split_specs(specs: list[str]):
@@ -322,4 +391,5 @@ def ops_from_args(args) -> EditOps:
         replace_files=dict(split_specs(args.replace_file)),
         remove_files=set(args.rm_file),
         base_path=args.base,
+        version=args.version,
     )

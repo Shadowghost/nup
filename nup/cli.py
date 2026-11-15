@@ -124,6 +124,9 @@ def add_edit_arguments(parser: argparse.ArgumentParser) -> None:
                         help="package for metadata edits: scope label (addon/2), kind when only "
                         "one package has it, or index "
                         "(default: the only package, else the base)")
+    parser.add_argument("--version", type=int,
+                        help="package version (NCM-style u32) of a base or add-on, e.g. a "
+                        "full dump at a later revision stored as version 0")
     meta = parser.add_argument_group("metadata (SPEC §3)")
     meta.add_argument("--name", help="title name, default language")
     meta.add_argument("--display-version", help="display version string, e.g. 1.2.0; without --package "
@@ -296,7 +299,9 @@ def command_edit(args) -> int:
     for line in report.warnings:
         print(f"nup: warning: {line}", file=sys.stderr)
     print(
-        f"edited {report.output}: {report.tlvs_set} TLVs set, {report.tlvs_removed} removed, "
+        f"edited {report.output}: "
+        + (f"version {report.version_set}, " if report.version_set is not None else "")
+        + f"{report.tlvs_set} TLVs set, {report.tlvs_removed} removed, "
         f"{report.files_added} added, {report.files_replaced} replaced, {report.files_removed} removed"
     )
     return 0
