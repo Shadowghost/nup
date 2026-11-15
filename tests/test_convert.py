@@ -539,9 +539,45 @@ def test_a_base_without_control_drops_v1s_update_version(tmp_path: Path, v1_tlvs
     report = convert_v1(str(src), str(out), stem="I")
     _found, (base,) = records(out / "I.nup")
     assert TlvType.DISPLAY_VERSION not in base.tlvs
-    assert any("newest update's" in line for line in report.warnings)
+    assert any("newer update's" in line for line in report.warnings)
     _found, (update,) = records(out / "I.update.65536.nup")
     assert update.tlvs[TlvType.DISPLAY_VERSION] == b"1.2.0"
+
+
+@pytest.mark.parametrize("base_version", [0, 65536])
+def test_a_base_drops_the_version_v1_copied_from_its_update(tmp_path: Path, base_version: int) -> None:
+    """Neither package has Control content: v1 wrote the update's display
+    version on the base too (Welcome Tour, Ocarina of Time, Orbitals). The
+    base's is left unset with a note; the update keeps its own."""
+    src = tmp_path / "copied.nup"
+    write_v1(src, [
+        Pkg(0, APP, {**exefs(APP, b"b"), "romfs/a": b"a"}, version=base_version,
+            tlvs={0x0004: b"1.1.1", 0x0005: b"Tour", 0x0006: b"Pub"}),
+        Pkg(1, APP + 0x800, {**exefs(APP, b"u"), "romfs/a": b"A"}, version=262144,
+            tlvs={0x0004: b"1.1.1", 0x0006: b"Pub"}),
+    ])
+    out = tmp_path / "out"
+    report = convert_v1(str(src), str(out), stem="T")
+    _found, (base,) = records(out / "T.nup")
+    assert TlvType.DISPLAY_VERSION not in base.tlvs
+    assert base.tlvs[TlvType.TITLE_NAME] == b"Tour"
+    assert any("no display version" in line and "'1.1.1' is a newer update's" in line
+               for line in report.warnings)
+    _found, (update,) = records(out / "T.update.262144.nup")
+    assert update.tlvs[TlvType.DISPLAY_VERSION] == b"1.1.1"
+
+
+def test_a_base_keeps_a_version_its_update_does_not_share(tmp_path: Path) -> None:
+    src = tmp_path / "own.nup"
+    write_v1(src, [
+        Pkg(0, APP, {**exefs(APP, b"b"), "romfs/a": b"a"}, tlvs={0x0004: b"1.0.0", 0x0005: b"Own"}),
+        Pkg(1, APP + 0x800, {**exefs(APP, b"u"), "romfs/a": b"A"}, version=65536, tlvs={0x0004: b"1.0.1"}),
+    ])
+    out = tmp_path / "out"
+    report = convert_v1(str(src), str(out), stem="O")
+    _found, (base,) = records(out / "O.nup")
+    assert base.tlvs[TlvType.DISPLAY_VERSION] == b"1.0.0"
+    assert not any("no display version" in line for line in report.warnings)
 
 
 def test_a_base_takes_an_updates_control_at_its_tree_root(tmp_path: Path) -> None:

@@ -433,7 +433,8 @@ class Converter:
         self.note_unversioned_base(base.label, pack_base_container(
             base_out, directory, title_id=self.program_id(base, index, directory), version=base.version,
             # the title's v1 metadata only where no Control content (its own or its update's) names it
-            tlvs=self.fallback_version_dropped(base_tlvs, fallback, base.label),
+            tlvs=self.copied_version_dropped(self.fallback_version_dropped(base_tlvs, fallback, base.label),
+                                             base, program, directory),
             program_index=index, application_id=self.app, control_fallback=fallback,
         ))
         self.convert_nested(base, directory, index, base.version, as_base=True)
@@ -479,13 +480,31 @@ class Converter:
         self.dropped_versions[label] = stated
         return {tlv: value for tlv, value in tlvs.items() if tlv != TlvType.DISPLAY_VERSION}
 
+    def copied_version_dropped(self, tlvs: dict[int, bytes], base: V1Package, program: Program,
+                               directory: str) -> dict[int, bytes]:
+        """tlvs without a display version v1 copied from a later update: v1 put
+        the title's one version on every package, so a base without Control
+        content of its own (none in its tree or its v1 metadata) that states
+        what a newer update of the program states describes that update."""
+        stated = tlvs.get(TlvType.DISPLAY_VERSION)
+        if stated is None or control_of(base.tlvs) is not None or read_control(directory) is not None:
+            return tlvs
+        for version, update in program.updates.items():
+            control = control_of(update.tlvs)
+            theirs = update.tlvs.get(V1Tlv.DISPLAY_VERSION) or (
+                control.display_version.encode("utf-8") if control and control.display_version else None)
+            if version > base.version and theirs is not None and bytes(theirs) == stated:
+                self.dropped_versions[base.label] = stated
+                return {tlv: value for tlv, value in tlvs.items() if tlv != TlvType.DISPLAY_VERSION}
+        return tlvs
+
     def note_unversioned_base(self, label: str, record) -> None:
         """As `nup pack` notes it (packcli.note_unversioned_base): a base left
         without a display version, with v1's dropped one when that is why."""
         if TlvType.DISPLAY_VERSION in record.tlvs:
             return
         dropped = self.dropped_versions.get(label)
-        why = (f"v1's {dropped.decode('utf-8', 'replace')!r} is its newest update's, and the base "
+        why = (f"v1's {dropped.decode('utf-8', 'replace')!r} is a newer update's, and the base "
                "has no Control content of its own" if dropped is not None else
                "the base has no Control content of its own")
         self.warn(f"{label}: no display version ({why}); set one with "
