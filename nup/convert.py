@@ -145,6 +145,7 @@ class Converter:
         self.program_packages = self.programs()
         self.v1_programs = set(self.program_packages)
         self.nested_bases: dict[int, str] = {}   # program<N>/ folders found in program 0's base tree
+        self.dropped_versions: dict[str, bytes] = {}   # base label: v1's version that was its update's
 
     def warn(self, text: str) -> None:
         self.report.warnings.append(text)
@@ -387,15 +388,17 @@ class Converter:
             title = program_title_id(path, self.app, nested)
             if as_base:
                 out = self.out("base", 0, nested)
-                pack_base_container(out, path, title_id=title, version=version, program_index=nested,
-                                    application_id=self.app)
+                self.note_unversioned_base(f"{package.label} program {nested}", pack_base_container(
+                    out, path, title_id=title, version=version, program_index=nested,
+                    application_id=self.app))
                 self.nested_bases[nested] = out
             elif nested in self.nested_bases:
                 pack_update_container(self.out("update", version, nested), path, self.nested_bases[nested],
                                       version=version, application_id=self.app)
             else:   # SPEC §5.2: a program that arrived in an update is stored as a base
-                pack_base_container(self.out("standalone", version, nested), path, title_id=title,
-                                    version=version, program_index=nested, application_id=self.app)
+                self.note_unversioned_base(f"{package.label} program {nested}", pack_base_container(
+                    self.out("standalone", version, nested), path, title_id=title,
+                    version=version, program_index=nested, application_id=self.app))
 
     def convert_program(self, index: int, program: Program) -> None:
         if program.base is None:
@@ -403,14 +406,14 @@ class Converter:
             for version, update in sorted(program.updates.items()):
                 directory = self.unpack(update)
                 out = self.out("standalone", version, index)
-                pack_base_container(
+                self.note_unversioned_base(update.label, pack_base_container(
                     out, directory, title_id=self.program_id(update, index, directory), version=version,
                     # the title's v1 metadata only where the tree has no Control content of its own
                     tlvs=self.tree_version_kept(self.tlvs_for(update, identity=True, label=update.label,
                                                               inherit=read_control(directory) is None),
                                                 directory, update.label),
                     program_index=index, application_id=self.app,
-                )
+                ))
                 self.convert_nested(update, directory, index, version, as_base=False)
                 shutil.rmtree(directory, ignore_errors=True)
             return
@@ -424,14 +427,15 @@ class Converter:
         directory = self.unpack(base)
         fallback = self.update_control(program, directory)
         base_out = self.out("base", 0, index)
-        pack_base_container(
+        base_tlvs = self.tree_version_kept(self.tlvs_for(base, identity=True, label=base.label,
+                                                         inherit=read_control(directory) is None and fallback is None),
+                                           directory, base.label)
+        self.note_unversioned_base(base.label, pack_base_container(
             base_out, directory, title_id=self.program_id(base, index, directory), version=base.version,
             # the title's v1 metadata only where no Control content (its own or its update's) names it
-            tlvs=self.tree_version_kept(self.tlvs_for(base, identity=True, label=base.label,
-                                                      inherit=read_control(directory) is None and fallback is None),
-                                        directory, base.label),
+            tlvs=self.fallback_version_dropped(base_tlvs, fallback, base.label),
             program_index=index, application_id=self.app, control_fallback=fallback,
-        )
+        ))
         self.convert_nested(base, directory, index, base.version, as_base=True)
         shutil.rmtree(directory, ignore_errors=True)
         if fallback is not None:
@@ -460,6 +464,32 @@ class Converter:
                   f"tree's NACP's {tree.display_version!r}; the NACP's kept (set another with "
                   "`nup edit --display-version`)")
         return {tlv: value for tlv, value in tlvs.items() if tlv != TlvType.DISPLAY_VERSION}
+
+    def fallback_version_dropped(self, tlvs: dict[int, bytes], fallback: str | None,
+                                 label: str) -> dict[int, bytes]:
+        """tlvs without a display version that is the newest update's: a base
+        dumped from an installed game has no Control content of its own (the
+        update's replaced it), and v1 put that update's version on the base.
+        `nup pack` leaves such a base without one (split_display_version)."""
+        stated = tlvs.get(TlvType.DISPLAY_VERSION)
+        update = read_control(fallback) if fallback is not None else None
+        if stated is None or update is None or not update.display_version \
+                or stated != update.display_version.encode("utf-8"):
+            return tlvs
+        self.dropped_versions[label] = stated
+        return {tlv: value for tlv, value in tlvs.items() if tlv != TlvType.DISPLAY_VERSION}
+
+    def note_unversioned_base(self, label: str, record) -> None:
+        """As `nup pack` notes it (packcli.note_unversioned_base): a base left
+        without a display version, with v1's dropped one when that is why."""
+        if TlvType.DISPLAY_VERSION in record.tlvs:
+            return
+        dropped = self.dropped_versions.get(label)
+        why = (f"v1's {dropped.decode('utf-8', 'replace')!r} is its newest update's, and the base "
+               "has no Control content of its own" if dropped is not None else
+               "the base has no Control content of its own")
+        self.warn(f"{label}: no display version ({why}); set one with "
+                  "`nup edit --package base --display-version`")
 
     def update_control(self, program: Program, base_dir: str) -> str | None:
         """The Control content of the program's newest update that has one,

@@ -78,6 +78,7 @@ def pack_standalone_flow(args, discovery, tlvs, title_id) -> int:
         base_tlvs=base_tlvs,
         update_tlvs=update_tlvs,
     )
+    note_unversioned_base(out, base_record)
     print(
         f"packed {out}: base ({len(base_record.files)} files) + update v{update_version} "
         f"({len(update_record.files)} diff files)"
@@ -99,6 +100,7 @@ def pack_single_flow(args, discovery, tlvs, title_id) -> int:
         version=version,
         tlvs=tlvs,
     )
+    note_unversioned_base(out, record)
     print(f"packed {out}: base, {len(record.files)} files")
     # program<N>/ beside exefs/ and romfs/: each program in its own container, beside out (SPEC §4.1)
     for line in pack_other_programs(args, discovery, record.title_id, out=out, version=version):
@@ -128,8 +130,9 @@ def pack_bundle_flow(args, discovery, tlvs, title_id, kind, application_id=None)
     base_out = args.out or default_name(discovery.base_dir, "base", 0, stem)
     title = resolve_title_id(title_id, discovery.base_dir)
     base_tlvs, update_tlvs = split_display_version(tlvs) if discovery.updates else (tlvs, {})
-    pack_base_container(base_out, discovery.base_dir, title_id=title, tlvs=base_tlvs,
-                        control_fallback=newest_control(discovery.updates))
+    note_unversioned_base(base_out, pack_base_container(
+        base_out, discovery.base_dir, title_id=title, tlvs=base_tlvs,
+        control_fallback=newest_control(discovery.updates)))
     written = [base_out]
     written.extend(pack_bundle_updates(args, discovery, title, base_out, stem, update_tlvs))
     written.extend(pack_other_programs(args, discovery, title))
@@ -194,31 +197,32 @@ def pack_other_programs(args, discovery, application_id: int, *, out: str | None
             for update_version in sorted(dump.updates):
                 standalone = placed(default_name(dump.updates[update_version], "standalone",
                                                  update_version, stem, index))
-                pack_base_container(
+                note_unversioned_base(standalone, pack_base_container(
                     standalone, dump.updates[update_version],
                     title_id=program_title_id(dump.updates[update_version], application_id, index),
                     version=update_version, program_index=index, application_id=application_id,
-                )
+                ))
                 written.append(standalone)
             continue
         title = program_title_id(dump.base_dir, application_id, index)
         if standalone_version is not None:
             if standalone_version in dump.updates:
                 pair = placed(default_name(dump.base_dir, "standalone", standalone_version, stem, index))
-                pack_standalone_container(pair, dump.base_dir, dump.updates[standalone_version],
-                                          update_version=standalone_version, base_title_id=title,
-                                          base_version=version, program_index=index,
-                                          application_id=application_id)
+                pair_base, _update = pack_standalone_container(
+                    pair, dump.base_dir, dump.updates[standalone_version],
+                    update_version=standalone_version, base_title_id=title,
+                    base_version=version, program_index=index, application_id=application_id)
+                note_unversioned_base(pair, pair_base)
                 written.append(pair)
                 continue
             dump = replace(dump, updates={})   # its other versions are not this pack's, as program 0's are not
         base_out = placed(default_name(dump.base_dir, "base", 0, stem, index))
-        pack_base_container(
+        note_unversioned_base(base_out, pack_base_container(
             base_out, dump.base_dir,
             title_id=title,
             version=version, program_index=index, application_id=application_id,
             control_fallback=newest_control(dump.updates),
-        )
+        ))
         written.append(base_out)
         for update_version in sorted(dump.updates):
             update_out = placed(default_name(dump.updates[update_version], "update", update_version, stem, index))
@@ -226,6 +230,15 @@ def pack_other_programs(args, discovery, application_id: int, *, out: str | None
                                   application_id=application_id)
             written.append(update_out)
     return written
+
+
+def note_unversioned_base(path: str, record) -> None:
+    """A base written without a display version: its dump had no Control
+    content of its own to name one (an installed game's was replaced by its
+    update's), and none is guessed. Say so now rather than leave it to `info`."""
+    if TlvType.DISPLAY_VERSION not in record.tlvs:
+        print(f"nup: note: {path}: no display version (the base has no Control content of its "
+              "own); set one with `nup edit --package base --display-version`", file=sys.stderr)
 
 
 def newest_control(updates: dict[int, str]) -> str | None:
@@ -301,6 +314,7 @@ def pack_updates_as_base_flow(args, discovery, tlvs, title_id) -> int:
             version=version,
             tlvs=tlvs,
         )
+        note_unversioned_base(out, record)
         print(
             f"packed {out}: update dump alone, stored as base v{version} "
             f"({len(record.files)} files) per SPEC §5.2"

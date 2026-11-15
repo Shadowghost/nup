@@ -523,6 +523,27 @@ def test_a_base_without_control_takes_its_updates(tmp_path: Path) -> None:
     assert TlvType.DISPLAY_VERSION not in base.tlvs   # the update's version, not the base's
 
 
+@pytest.mark.parametrize("v1_tlvs", [{0x0004: b"1.2.0"},
+                                     {0x0002: nacp({"AmericanEnglish": ("Wonder", "Pub")}, "1.2.0")}])
+def test_a_base_without_control_drops_v1s_update_version(tmp_path: Path, v1_tlvs) -> None:
+    """An installed-game dump: v1 put the newest update's display version on the
+    base (as its TLV or as the update's NACP), and the base has no Control content
+    to say otherwise. Left unset, as `nup pack` leaves it, not the update's."""
+    src = tmp_path / "inst.nup"
+    write_v1(src, [
+        Pkg(0, APP, {**exefs(APP, b"b"), "romfs/a": b"a"}, tlvs=v1_tlvs),
+        Pkg(1, APP + 0x800, {**exefs(APP, b"u"), "romfs/a": b"A", "control/control.nacp": nacp(
+            {"AmericanEnglish": ("Wonder", "Pub")}, "1.2.0")}, version=65536),
+    ])
+    out = tmp_path / "out"
+    report = convert_v1(str(src), str(out), stem="I")
+    _found, (base,) = records(out / "I.nup")
+    assert TlvType.DISPLAY_VERSION not in base.tlvs
+    assert any("newest update's" in line for line in report.warnings)
+    _found, (update,) = records(out / "I.update.65536.nup")
+    assert update.tlvs[TlvType.DISPLAY_VERSION] == b"1.2.0"
+
+
 def test_a_base_takes_an_updates_control_at_its_tree_root(tmp_path: Path) -> None:
     """control.nacp at the update's root, where `nup pack` also finds it (nacp.find_control_dir)."""
     src = tmp_path / "root.nup"

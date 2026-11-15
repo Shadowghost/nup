@@ -265,13 +265,15 @@ def test_icon_left_out_when_it_cannot_fit(tmp_path: Path) -> None:
 
 
 def test_base_without_control_takes_the_newest_updates_identity(
-        console_bundle: Path, tmp_path: Path, monkeypatch) -> None:
+        console_bundle: Path, tmp_path: Path, monkeypatch, capsys) -> None:
     """A dump of an installed game: the update's Control replaced the base's (SPEC §3.1)."""
     import shutil
     shutil.rmtree(console_bundle / "base/program/0/control")
     add_control(console_bundle / "updates/65536/program/0", "1.0.1", AmericanEnglish=("Old Name", "Old Pub"))
     monkeypatch.chdir(tmp_path)
     assert nup_main(["pack", str(console_bundle)]) == 0
+    notes = [line for line in capsys.readouterr().err.splitlines() if "no display version" in line]
+    assert len(notes) == 1 and "Wonder.nup" in notes[0] and "--display-version" in notes[0]
     base = record_of(tmp_path / "Wonder.nup")
     assert text(base, TlvType.TITLE_NAME) == "Wonder Title" and text(base, TlvType.PUBLISHER) == "Wonder Pub"   # 131072's, the newest
     icon = console_bundle / "updates/131072/program/0/control/icon_AmericanEnglish.dat"
@@ -280,7 +282,15 @@ def test_base_without_control_takes_the_newest_updates_identity(
     assert text(record_of(tmp_path / "Wonder.update.131072.nup"), TlvType.DISPLAY_VERSION) == "1.1.0"
 
 
-def test_dump_without_control_keeps_working(base_dump: Path, tmp_path: Path) -> None:
+def test_dump_without_control_keeps_working(base_dump: Path, tmp_path: Path, capsys) -> None:
     out = tmp_path / "plain.nup"
     assert nup_main(["pack", str(base_dump), "-o", str(out)]) == 0
     assert TlvType.TITLE_NAME not in record_of(out).tlvs
+    assert "no display version" in capsys.readouterr().err
+
+
+def test_a_versioned_base_gets_no_note(tmp_path: Path, capsys) -> None:
+    content = make_dump(tmp_path / "v", title_id=APP, seed=b"v")
+    add_control(content, "1.0.0")
+    assert nup_main(["pack", str(content), "-o", str(tmp_path / "v.nup")]) == 0
+    assert "no display version" not in capsys.readouterr().err
